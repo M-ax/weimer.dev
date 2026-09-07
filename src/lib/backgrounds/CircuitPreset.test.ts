@@ -38,6 +38,8 @@ interface CircuitPresetTestHarness {
     createDip(scale: number, random: () => number): TestComponent;
     connectAddedComponent(component: TestComponent, random: () => number): TestWire[];
     removalWireRange(wire: TestWire, component: TestComponent, progress: number): [number, number];
+    beginRemoval(now: number): void;
+    selectRemovalBatch(candidates: TestComponent[], random: () => number): TestComponent[];
     advanceLifecycle(now: number): void;
     placeComponent(component: TestComponent, width: number, height: number, random: () => number): boolean;
     components: TestComponent[];
@@ -45,8 +47,9 @@ interface CircuitPresetTestHarness {
     lifecycle: {
         phase: 'lifting' | 'erasing' | 'lowering' | 'growing';
         startedAt: number;
-        component: TestComponent;
+        components: TestComponent[];
         wires: TestWire[];
+        wireSet: Set<TestWire>;
     } | null;
 }
 
@@ -285,7 +288,13 @@ describe('CircuitPreset component lifecycle', () => {
         const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
         preset.components = [source, target];
         preset.wires = [wire];
-        preset.lifecycle = {phase: 'erasing', startedAt: 0, component: source, wires: [wire]};
+        preset.lifecycle = {
+            phase: 'erasing',
+            startedAt: 0,
+            components: [source],
+            wires: [wire],
+            wireSet: new Set([wire]),
+        };
 
         preset.advanceLifecycle(1_000);
 
@@ -297,6 +306,63 @@ describe('CircuitPreset component lifecycle', () => {
         expect(preset.components).toEqual([target]);
         expect(preset.wires).toHaveLength(0);
         expect(target.pins[0].used).toBe(false);
+    });
+
+    test('selects up to three mutually unconnected components with unique adjacent wires', () => {
+        const first = createComponent(0, 0, 'right');
+        const second = createComponent(300, 0, 'left');
+        const third = createComponent(0, 180, 'right');
+        const fourth = createComponent(300, 180, 'left');
+        const fifth = createComponent(0, 360, 'right');
+        const sixth = createComponent(300, 360, 'left');
+        const wires = [
+            createOwnedWire(first, second),
+            createOwnedWire(third, fourth),
+            createOwnedWire(fifth, sixth),
+        ];
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+        preset.components = [first, second, third, fourth, fifth, sixth];
+        preset.wires = wires;
+
+        const selected = preset.selectRemovalBatch(preset.components, () => 0.99);
+        const selectedWires = wires.filter((wire) =>
+            selected.includes(wire.fromComponent!) || selected.includes(wire.toComponent!),
+        );
+
+        expect(selected).toEqual([sixth, fourth, second]);
+        expect(selected).toHaveLength(3);
+        expect(new Set(selectedWires).size).toBe(selectedWires.length);
+        expect(selectedWires.every((wire) =>
+            !(selected.includes(wire.fromComponent!) && selected.includes(wire.toComponent!)),
+        )).toBe(true);
+    });
+
+    test('removes every component in a batch before adding replacements', () => {
+        const first = createComponent(0, 0, 'right');
+        const second = createComponent(300, 0, 'left');
+        const survivor = createComponent(600, 0, 'left');
+        const firstWire = createOwnedWire(first, second);
+        const secondWire = createOwnedWire(second, survivor);
+        first.pins[1].used = true;
+        second.pins[0].used = true;
+        second.pins[1].used = true;
+        survivor.pins[0].used = true;
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+        preset.components = [first, second, survivor];
+        preset.wires = [firstWire, secondWire];
+        preset.lifecycle = {
+            phase: 'erasing',
+            startedAt: 0,
+            components: [first, second],
+            wires: [firstWire, secondWire],
+            wireSet: new Set([firstWire, secondWire]),
+        };
+
+        preset.advanceLifecycle(1_751);
+
+        expect(preset.components).toEqual([survivor]);
+        expect(preset.wires).toHaveLength(0);
+        expect(survivor.pins[0].used).toBe(false);
     });
 
     test('connects a lowered component to nearby components with free pins', () => {

@@ -18,3 +18,11 @@ export interface BackgroundPreset {
   resize(dimensions: BackgroundDimensions): void;
   draw(context: CanvasRenderingContext2D, frame: BackgroundFrame): void;
 }
+
+export interface LayeredBackgroundPreset extends BackgroundPreset {
+  readonly staticVersion: number;
+  readonly hasDynamicContent: boolean;
+  prepareFrame(frame: BackgroundFrame): void;
+  drawStatic(context: CanvasRenderingContext2D, frame: BackgroundFrame): void;
+  drawDynamic(context: CanvasRenderingContext2D, frame: BackgroundFrame): void;
+}

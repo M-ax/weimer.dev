@@ -3,7 +3,12 @@
   import { CircuitPreset } from '../backgrounds/CircuitPreset';
   import { ConstellationPreset } from '../backgrounds/ConstellationPreset';
   import { MazePreset, mazeStepInterval } from '../backgrounds/MazePreset';
-  import type { BackgroundDimensions, BackgroundPreset, PresetName } from '../backgrounds/types';
+  import type {
+    BackgroundDimensions,
+    BackgroundPreset,
+    LayeredBackgroundPreset,
+    PresetName,
+  } from '../backgrounds/types';
 
   export let scrollOffset = 0;
   export let presetName: PresetName | undefined = undefined;
@@ -15,7 +20,9 @@
   const resizeIdleDelay = 200;
 
   let background: HTMLDivElement;
+  let canvasStack: HTMLDivElement;
   let canvas: HTMLCanvasElement;
+  let dynamicCanvas: HTMLCanvasElement;
   let transitionCanvas: HTMLCanvasElement;
   let canvasHeight = 0;
 
@@ -32,9 +39,17 @@
     return availablePresets[Math.floor(Math.random() * availablePresets.length)];
   }
 
+  function isLayeredPreset(candidate: BackgroundPreset): candidate is LayeredBackgroundPreset {
+    return 'staticVersion' in candidate
+      && 'prepareFrame' in candidate
+      && 'drawStatic' in candidate
+      && 'drawDynamic' in candidate;
+  }
+
   onMount(() => {
-    const context = canvas.getContext('2d');
-    if (!context) return;
+    const context = canvas.getContext('2d', { alpha: false });
+    const dynamicContext = dynamicCanvas.getContext('2d');
+    if (!context || !dynamicContext) return;
 
     preset = presetName ? presets[presetName] : randomPreset();
     let width = 0;
@@ -51,6 +66,8 @@
     let sizeAnimation: Animation | null = null;
     let transitionDimensions: BackgroundDimensions | null = null;
     let cursor: { x: number; y: number } | undefined;
+    let renderedStaticVersion = -1;
+    let renderedStaticOffset = Number.NaN;
 
     const measureViewport = () => {
       const bounds = background.getBoundingClientRect();
@@ -86,7 +103,10 @@
       pixelRatio = dimensions.pixelRatio;
       canvas.width = Math.floor(width * pixelRatio);
       canvas.height = Math.floor(height * pixelRatio);
+      dynamicCanvas.width = canvas.width;
+      dynamicCanvas.height = canvas.height;
       preset.resize(dimensions);
+      renderedStaticVersion = -1;
       backdrop = context.createLinearGradient(0, 0, width, height);
       backdrop.addColorStop(0, '#07151a');
       backdrop.addColorStop(1, '#101222');
@@ -97,21 +117,42 @@
       lastFrameAt = now;
       const scrollSmoothing = 1 - Math.pow(1 - 0.035, elapsed / mazeStepInterval);
       smoothedScroll += (scrollOffset - smoothedScroll) * scrollSmoothing;
-      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-      context.fillStyle = backdrop;
-      context.fillRect(0, 0, width, height);
-
-      context.save();
-      context.translate(0, -smoothedScroll * parallaxFactor);
-      preset.draw(context, {
+      const frame = {
         now,
         elapsed,
         width,
         height,
         pixelRatio,
         cursor: cursor && { x: cursor.x, y: cursor.y + smoothedScroll * parallaxFactor },
-      });
-      context.restore();
+      };
+      const staticOffset = -smoothedScroll * parallaxFactor;
+
+      if (isLayeredPreset(preset)) {
+        preset.prepareFrame(frame);
+        if (renderedStaticVersion !== preset.staticVersion || renderedStaticOffset !== staticOffset) {
+          context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+          context.fillStyle = backdrop;
+          context.fillRect(0, 0, width, height);
+          context.translate(0, staticOffset);
+          preset.drawStatic(context, frame);
+          renderedStaticVersion = preset.staticVersion;
+          renderedStaticOffset = staticOffset;
+        }
+
+        if (preset.hasDynamicContent) {
+          dynamicContext.setTransform(1, 0, 0, 1, 0, 0);
+          dynamicContext.clearRect(0, 0, dynamicCanvas.width, dynamicCanvas.height);
+          dynamicContext.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+          dynamicContext.translate(0, staticOffset);
+          preset.drawDynamic(dynamicContext, frame);
+        }
+      } else {
+        context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+        context.fillStyle = backdrop;
+        context.fillRect(0, 0, width, height);
+        context.translate(0, staticOffset);
+        preset.draw(context, frame);
+      }
 
       hasDrawn = true;
     };
@@ -148,7 +189,9 @@
       transitionCanvas.width = canvas.width;
       transitionCanvas.height = canvas.height;
       transitionCanvas.style.height = `${transitionDimensions.height}px`;
-      transitionCanvas.getContext('2d')?.drawImage(canvas, 0, 0);
+      const transitionContext = transitionCanvas.getContext('2d');
+      transitionContext?.drawImage(canvas, 0, 0);
+      transitionContext?.drawImage(dynamicCanvas, 0, 0);
       return true;
     };
 
@@ -159,7 +202,7 @@
       transitionDimensions = null;
       const duration = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 520;
       const timing = { duration, easing: 'cubic-bezier(0.22, 1, 0.36, 1)', fill: 'forwards' as const };
-      const newSizeAnimation = canvas.animate(
+      const newSizeAnimation = canvasStack.animate(
         [{ height: `${fromDimensions.height}px` }, { height: `${height}px` }],
         timing,
       );
@@ -245,13 +288,17 @@
   });
 </script>
 
-<div class:unfiltered class="background" bind:this={background} aria-hidden={!showLabel}>
-  <canvas class="background-canvas" bind:this={canvas} style:height={`${canvasHeight}px`}></canvas>
+<div class:unfiltered class="background" bind:this={background} aria-hidden="true">
+  <div class="canvas-stack" bind:this={canvasStack} style:height={`${canvasHeight}px`}>
+    <canvas class="background-canvas" bind:this={canvas}></canvas>
+    <canvas class="dynamic-canvas" bind:this={dynamicCanvas}></canvas>
+  </div>
   <canvas class="transition-canvas" bind:this={transitionCanvas}></canvas>
-  {#if showLabel}
-    <a href={`/background/${preset.name}`} aria-label={`View ${preset.label} without filters`}>{preset.label} · live</a>
-  {/if}
 </div>
+
+{#if showLabel}
+  <a class="background-link" href={`/background/${preset.name}`} aria-label={`View ${preset.label} without filters`}>{preset.label} · live</a>
+{/if}
 
 <style>
   .background {
@@ -263,15 +310,30 @@
     pointer-events: none;
   }
 
+  .canvas-stack,
+  .transition-canvas {
+    filter: blur(2px) brightness(0.48) saturate(0.82);
+    transform: scale(1.035);
+  }
+
+  .canvas-stack {
+    position: absolute;
+    inset: 0;
+  }
+
   canvas {
     width: 100%;
     height: 100%;
     display: block;
-    filter: blur(2.4px) brightness(0.48) saturate(0.82);
-    transform: scale(1.035);
   }
 
-  .unfiltered canvas {
+  .dynamic-canvas {
+    position: absolute;
+    inset: 0;
+  }
+
+  .unfiltered .canvas-stack,
+  .unfiltered .transition-canvas {
     filter: none;
     transform: none;
   }
@@ -284,8 +346,8 @@
     pointer-events: none;
   }
 
-  a {
-    position: absolute;
+  .background-link {
+    position: fixed;
     z-index: 2;
     right: 1.5rem;
     bottom: 1.25rem;
@@ -297,12 +359,12 @@
     text-transform: uppercase;
   }
 
-  a:hover {
+  .background-link:hover {
     color: rgba(220, 244, 239, 0.82);
   }
 
   @media (max-width: 640px) {
-    a {
+    .background-link {
       right: 1rem;
       bottom: 0.9rem;
     }

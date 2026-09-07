@@ -1,4 +1,4 @@
-import type {BackgroundDimensions, BackgroundFrame, BackgroundPreset} from './types';
+import type {BackgroundDimensions, BackgroundFrame, LayeredBackgroundPreset} from './types';
 
 type PinSide = 'top' | 'right' | 'bottom' | 'left';
 type CpuCorner = 'top-left' | 'top-right' | 'bottom-right' | 'bottom-left';
@@ -43,8 +43,9 @@ type CircuitLifecyclePhase = 'lifting' | 'erasing' | 'lowering' | 'growing';
 interface CircuitLifecycle {
     phase: CircuitLifecyclePhase;
     startedAt: number;
-    component: CircuitComponent;
+    components: CircuitComponent[];
     wires: CircuitWire[];
+    wireSet: Set<CircuitWire>;
 }
 
 interface CircuitLayout {
@@ -54,9 +55,10 @@ interface CircuitLayout {
     scale: number;
 }
 
-export class CircuitPreset implements BackgroundPreset {
+export class CircuitPreset implements LayeredBackgroundPreset {
     readonly name = 'circuit' as const;
     readonly label = 'Circuit field';
+    readonly hasDynamicContent = true;
     private readonly gridSize = 15;
     private readonly busLaneSpacing = this.gridSize;
     private readonly componentExclusionZone = this.gridSize * 2;
@@ -70,6 +72,11 @@ export class CircuitPreset implements BackgroundPreset {
     private layout: CircuitLayout | null = null;
     private nextLifecycleAt = 0;
     private transitionSeed = 0;
+    private _staticVersion = 0;
+
+    get staticVersion() {
+        return this._staticVersion;
+    }
 
     resize({width, height, pixelRatio}: BackgroundDimensions) {
         const seed = Math.round(width) * 73_856_093 ^ Math.round(height) * 19_349_663;
@@ -128,14 +135,29 @@ export class CircuitPreset implements BackgroundPreset {
         this.renderStaticLayer(width, height, pixelRatio);
     }
 
-    draw(context: CanvasRenderingContext2D, {now, width, height}: BackgroundFrame) {
+    draw(context: CanvasRenderingContext2D, frame: BackgroundFrame) {
+        this.prepareFrame(frame);
+        this.drawStatic(context, frame);
+        this.drawDynamic(context, frame);
+    }
+
+    prepareFrame({now}: BackgroundFrame) {
         this.advanceLifecycle(now);
+    }
+
+    drawStatic(context: CanvasRenderingContext2D, {width, height}: BackgroundFrame) {
         context.save();
         if (this.staticLayer) context.drawImage(this.staticLayer, 0, 0, width, height);
-        else this.drawStaticCircuit(context, width, height, now, this.lifecycle);
+        else this.drawStaticCircuit(context, width, height, 0, this.lifecycle);
+        context.restore();
+    }
+
+    drawDynamic(context: CanvasRenderingContext2D, {now}: BackgroundFrame) {
+        context.save();
         this.drawLifecycle(context, now);
+        const lifecycleWires = this.lifecycle?.wireSet;
         this.wires.forEach((wire) => {
-            if (!this.lifecycle?.wires.includes(wire)) this.drawPulse(context, wire, now);
+            if (!lifecycleWires?.has(wire)) this.drawPulse(context, wire, now);
         });
         context.restore();
     }
@@ -572,45 +594,80 @@ export class CircuitPreset implements BackgroundPreset {
         }
 
         const random = this.createTransitionRandom();
-        const component = candidates[Math.floor(random() * candidates.length)];
+        const components = this.selectRemovalBatch(candidates, random);
+        const selectedComponents = new Set(components);
+        const wires = this.wires.filter((wire) =>
+            selectedComponents.has(wire.fromComponent) || selectedComponents.has(wire.toComponent),
+        );
         this.lifecycle = {
             phase: 'lifting',
             startedAt: now,
-            component,
-            wires: this.wires.filter((wire) => wire.fromComponent === component || wire.toComponent === component),
+            components,
+            wires,
+            wireSet: new Set(wires),
         };
         this.refreshStaticLayer();
+    }
+
+    private selectRemovalBatch(candidates: CircuitComponent[], random: () => number) {
+        const targetSize = 1 + Math.floor(random() * Math.min(3, candidates.length));
+        const remaining = [...candidates];
+        const selected: CircuitComponent[] = [];
+
+        while (selected.length < targetSize) {
+            const eligible = remaining.filter((candidate) => selected.every((component) =>
+                !this.wires.some((wire) =>
+                    (wire.fromComponent === component && wire.toComponent === candidate)
+                    || (wire.fromComponent === candidate && wire.toComponent === component),
+                ),
+            ));
+            if (!eligible.length) break;
+
+            const component = eligible[Math.floor(random() * eligible.length)];
+            selected.push(component);
+            remaining.splice(remaining.indexOf(component), 1);
+        }
+
+        return selected;
     }
 
     private finishRemoval(now: number) {
         const lifecycle = this.lifecycle;
         if (!lifecycle) return;
 
+        const removedComponents = new Set(lifecycle.components);
         lifecycle.wires.forEach((wire) => {
-            const remainingPin = wire.fromComponent === lifecycle.component ? wire.toPin : wire.fromPin;
-            remainingPin.used = false;
+            if (!removedComponents.has(wire.fromComponent)) wire.fromPin.used = false;
+            if (!removedComponents.has(wire.toComponent)) wire.toPin.used = false;
         });
-        this.wires = this.wires.filter((wire) => !lifecycle.wires.includes(wire));
-        this.components = this.components.filter((component) => component !== lifecycle.component);
+        this.wires = this.wires.filter((wire) => !lifecycle.wireSet.has(wire));
+        this.components = this.components.filter((component) => !removedComponents.has(component));
         this.lifecycle = null;
-        this.beginAddition(now, lifecycle.component.kind);
+        this.beginAddition(now, lifecycle.components);
     }
 
-    private beginAddition(now: number, removedKind: CircuitComponent['kind']) {
+    private beginAddition(now: number, removedComponents: CircuitComponent[]) {
         if (!this.layout) return;
 
         const random = this.createTransitionRandom();
-        const component = removedKind === 'cpu'
-            ? this.createCpu(this.layout.scale, random)
-            : this.createDip(this.layout.scale, random);
-        if (!this.placeComponent(component, this.layout.width, this.layout.height, random)) {
+        const components: CircuitComponent[] = [];
+        for (const removedComponent of removedComponents) {
+            const component = removedComponent.kind === 'cpu'
+                ? this.createCpu(this.layout.scale, random)
+                : this.createDip(this.layout.scale, random);
+            if (this.placeComponent(component, this.layout.width, this.layout.height, random)) {
+                this.components.push(component);
+                components.push(component);
+                continue;
+            }
+
+            this.components.splice(this.components.length - components.length, components.length);
             this.nextLifecycleAt = now + this.lifecycleInterval;
             this.refreshStaticLayer();
             return;
         }
 
-        this.components.push(component);
-        this.lifecycle = {phase: 'lowering', startedAt: now, component, wires: []};
+        this.lifecycle = {phase: 'lowering', startedAt: now, components, wires: [], wireSet: new Set()};
         this.refreshStaticLayer();
     }
 
@@ -618,7 +675,9 @@ export class CircuitPreset implements BackgroundPreset {
         const lifecycle = this.lifecycle;
         if (!lifecycle) return;
 
-        lifecycle.wires = this.connectAddedComponent(lifecycle.component, this.createTransitionRandom());
+        const random = this.createTransitionRandom();
+        lifecycle.wires = lifecycle.components.flatMap((component) => this.connectAddedComponent(component, random));
+        lifecycle.wireSet = new Set(lifecycle.wires);
         lifecycle.phase = 'growing';
         lifecycle.startedAt = now;
         this.refreshStaticLayer();
@@ -681,20 +740,28 @@ export class CircuitPreset implements BackgroundPreset {
     ) {
         const pixelWidth = Math.max(1, Math.floor(width * pixelRatio));
         const pixelHeight = Math.max(1, Math.floor(height * pixelRatio));
-        const staticLayer = typeof OffscreenCanvas === 'function'
-            ? new OffscreenCanvas(pixelWidth, pixelHeight)
-            : document.createElement('canvas');
-        staticLayer.width = pixelWidth;
-        staticLayer.height = pixelHeight;
+        const staticLayer = this.staticLayer
+            && this.staticLayer.width === pixelWidth
+            && this.staticLayer.height === pixelHeight
+            ? this.staticLayer
+            : typeof OffscreenCanvas === 'function'
+                ? new OffscreenCanvas(pixelWidth, pixelHeight)
+                : document.createElement('canvas');
+        if (staticLayer.width !== pixelWidth) staticLayer.width = pixelWidth;
+        if (staticLayer.height !== pixelHeight) staticLayer.height = pixelHeight;
         const context = staticLayer.getContext('2d');
         if (!context) {
             this.staticLayer = null;
+            this._staticVersion += 1;
             return;
         }
 
+        context.setTransform(1, 0, 0, 1, 0, 0);
+        context.clearRect(0, 0, pixelWidth, pixelHeight);
         context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
         this.drawStaticCircuit(context, width, height, 0, lifecycle);
         this.staticLayer = staticLayer;
+        this._staticVersion += 1;
     }
 
     private drawStaticCircuit(
@@ -708,11 +775,13 @@ export class CircuitPreset implements BackgroundPreset {
         context.lineCap = 'round';
         context.lineJoin = 'round';
         this.drawDotGrid(context, width, height);
+        const lifecycleWires = lifecycle?.wireSet;
+        const lifecycleComponents = lifecycle && new Set(lifecycle.components);
         this.wires.forEach((wire) => {
-            if (!lifecycle?.wires.includes(wire)) this.drawWire(context, wire);
+            if (!lifecycleWires?.has(wire)) this.drawWire(context, wire);
         });
         this.components.forEach((component) => {
-            if (component !== lifecycle?.component) this.drawComponent(context, component, now);
+            if (!lifecycleComponents?.has(component)) this.drawComponent(context, component, now);
         });
         context.restore();
     }
@@ -741,21 +810,30 @@ export class CircuitPreset implements BackgroundPreset {
                 this.drawWireRange(context, wire, 0, 1);
                 this.drawPulseRange(context, wire, now, 0, 1);
             });
-            this.drawTransitionComponent(context, lifecycle.component, now, progress, true);
+            lifecycle.components.forEach((component) =>
+                this.drawTransitionComponent(context, component, now, progress, true),
+            );
         } else if (lifecycle.phase === 'erasing') {
             lifecycle.wires.forEach((wire) => {
-                const [start, end] = this.removalWireRange(wire, lifecycle.component, progress);
+                const removedComponent = lifecycle.components.includes(wire.fromComponent)
+                    ? wire.fromComponent
+                    : wire.toComponent;
+                const [start, end] = this.removalWireRange(wire, removedComponent, progress);
                 this.drawWireRange(context, wire, start, end);
                 this.drawPulseRange(context, wire, now, start, end);
             });
         } else if (lifecycle.phase === 'lowering') {
-            this.drawTransitionComponent(context, lifecycle.component, now, progress, false);
+            lifecycle.components.forEach((component) =>
+                this.drawTransitionComponent(context, component, now, progress, false),
+            );
         } else {
             lifecycle.wires.forEach((wire) => {
                 this.drawWireRange(context, wire, 0, progress);
                 this.drawPulseRange(context, wire, now, 0, progress);
             });
-            this.drawTransitionComponent(context, lifecycle.component, now, 1, false);
+            lifecycle.components.forEach((component) =>
+                this.drawTransitionComponent(context, component, now, 1, false),
+            );
         }
         context.restore();
     }

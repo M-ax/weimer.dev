@@ -1,4 +1,3 @@
-import type { BackgroundDimensions, BackgroundFrame, BackgroundPreset } from './types';
 
 type Direction = 'north' | 'east' | 'south' | 'west';
 type SolveState = 'unseen' | 'explored' | 'route';
@@ -43,31 +42,49 @@ const mazeRebuildDelay = 8_000;
 const routeBatchSize = 500;
 export const mazeStepInterval = 1_000 / 15;
 
-export class MazePreset implements BackgroundPreset {
+export class MazePreset implements LayeredBackgroundPreset {
   readonly name = 'maze' as const;
   readonly label = 'Maze solver';
+  readonly hasDynamicContent = false;
   private maze: Maze | null = null;
   private layer: HTMLCanvasElement | null = null;
   private layerContext: CanvasRenderingContext2D | null = null;
+  private _staticVersion = 0;
+
+  get staticVersion() {
+    return this._staticVersion;
+  }
 
   resize(dimensions: BackgroundDimensions) {
     this.maze = this.createMaze(dimensions.width, dimensions.height);
     this.buildLayer(this.maze, dimensions);
+    this._staticVersion += 1;
   }
 
   draw(context: CanvasRenderingContext2D, frame: BackgroundFrame) {
+    this.prepareFrame(frame);
+    this.drawStatic(context, frame);
+    this.drawDynamic(context, frame);
+  }
+
+  prepareFrame(frame: BackgroundFrame) {
     if (!this.maze) return;
     this.advance(this.maze, frame);
+  }
+
+  drawStatic(context: CanvasRenderingContext2D, { width, height }: BackgroundFrame) {
     if (!this.maze) return;
 
     const { cellSize, columns, current } = this.maze;
-    if (this.layer) context.drawImage(this.layer, 0, 0, frame.width, frame.height);
+    if (this.layer) context.drawImage(this.layer, 0, 0, width, height);
 
     const currentX = (current % columns) * cellSize;
     const currentY = Math.floor(current / columns) * cellSize;
     context.fillStyle = 'rgba(255, 246, 196, 0.96)';
     context.fillRect(currentX + 2, currentY + 2, cellSize - 4, cellSize - 4);
   }
+
+  drawDynamic(_context: CanvasRenderingContext2D, _frame: BackgroundFrame) {}
 
   private createMaze(width: number, height: number): Maze {
     const cellSize = mazeCellSize;
@@ -190,12 +207,17 @@ export class MazePreset implements BackgroundPreset {
 
   private advance(state: Maze, frame: BackgroundFrame) {
     if (state.solvedAt) {
-      if (frame.now - state.solvedAt > mazeRebuildDelay) { this.resize(frame); return; }
+      if (frame.now - state.solvedAt > mazeRebuildDelay) {
+        this.resize(frame);
+        return;
+      }
       if (frame.now - state.lastStepAt < mazeStepInterval) return;
       state.lastStepAt = frame.now;
       const nextRouteProgress = Math.min(state.routeProgress + routeBatchSize, state.stack.length);
+      if (nextRouteProgress === state.routeProgress) return;
       this.paintCells(state, state.stack.slice(state.routeProgress, nextRouteProgress));
       state.routeProgress = nextRouteProgress;
+      this._staticVersion += 1;
       return;
     }
 
@@ -207,8 +229,10 @@ export class MazePreset implements BackgroundPreset {
       return;
     }
 
+    const previousCurrent = state.current;
     const exploredIndex = this.advanceSolver(state);
     if (exploredIndex !== null) this.paintCells(state, [exploredIndex]);
+    if (exploredIndex !== null || state.current !== previousCurrent) this._staticVersion += 1;
   }
 }
 

@@ -16,6 +16,10 @@ interface Maze {
   columns: number;
   rows: number;
   cells: MazeCell[];
+  frontier: number[];
+  queued: Set<number>;
+  costs: number[];
+  parents: number[];
   stack: number[];
   visited: Set<number>;
   current: number;
@@ -40,12 +44,14 @@ const directionSteps: Array<{
 const mazeCellSize = 15;
 const mazeRebuildDelay = 8_000;
 const routeBatchSize = 500;
+const initialSolverProgress = 0.08;
+const initialSolverProgressVariance = 0.04;
 export const mazeStepInterval = 1_000 / 15;
 
 export class MazePreset implements LayeredBackgroundPreset {
   readonly name = 'maze' as const;
   readonly label = 'Maze solver';
-  readonly hasDynamicContent = false;
+  readonly hasDynamicContent = true;
   private maze: Maze | null = null;
   private layer: HTMLCanvasElement | null = null;
   private layerContext: CanvasRenderingContext2D | null = null;
@@ -75,16 +81,22 @@ export class MazePreset implements LayeredBackgroundPreset {
   drawStatic(context: CanvasRenderingContext2D, { width, height }: BackgroundFrame) {
     if (!this.maze) return;
 
-    const { cellSize, columns, current } = this.maze;
     if (this.layer) context.drawImage(this.layer, 0, 0, width, height);
-
-    const currentX = (current % columns) * cellSize;
-    const currentY = Math.floor(current / columns) * cellSize;
-    context.fillStyle = 'rgba(255, 246, 196, 0.96)';
-    context.fillRect(currentX + 2, currentY + 2, cellSize - 4, cellSize - 4);
   }
 
-  drawDynamic(_context: CanvasRenderingContext2D, _frame: BackgroundFrame) {}
+  drawDynamic(context: CanvasRenderingContext2D, _frame: BackgroundFrame) {
+    if (!this.maze || this.maze.solvedAt !== null) return;
+
+    const { cellSize, columns, frontier } = this.maze;
+    context.save();
+    context.fillStyle = 'rgba(255, 246, 196, 0.96)';
+    frontier.forEach((index) => {
+      const x = (index % columns) * cellSize;
+      const y = Math.floor(index / columns) * cellSize;
+      context.fillRect(x + 2, y + 2, cellSize - 4, cellSize - 4);
+    });
+    context.restore();
+  }
 
   private createMaze(width: number, height: number): Maze {
     const cellSize = mazeCellSize;
@@ -124,8 +136,12 @@ export class MazePreset implements LayeredBackgroundPreset {
       columns,
       rows,
       cells,
-      stack: [0],
-      visited: new Set([0]),
+      frontier: [0],
+      queued: new Set([0]),
+      costs: cells.map((_, index) => index === 0 ? 0 : Infinity),
+      parents: cells.map(() => -1),
+      stack: [],
+      visited: new Set(),
       current: 0,
       target: columns * rows - 1,
       solvedAt: null,
@@ -133,8 +149,10 @@ export class MazePreset implements LayeredBackgroundPreset {
       lastStepAt: 0,
     };
 
-    const initialProgress = Math.floor(cells.length * (0.35 + Math.random() * 0.15));
-    while (maze.visited.size < initialProgress && maze.current !== maze.target) {
+    const initialProgress = Math.floor(cells.length * (
+      initialSolverProgress + Math.random() * initialSolverProgressVariance
+    ));
+    while (maze.visited.size < initialProgress && maze.frontier.length && !maze.frontier.includes(maze.target)) {
       this.advanceSolver(maze);
     }
 
@@ -142,22 +160,54 @@ export class MazePreset implements LayeredBackgroundPreset {
   }
 
   private advanceSolver(state: Maze) {
-    const candidates = getNeighbours(state.current, state.columns, state.rows).filter(
-      (step) => !state.cells[state.current][step.direction] && !state.visited.has(step.index),
-    );
+    if (!state.frontier.length) return [];
 
-    if (candidates.length) {
-      const next = candidates[Math.floor(Math.random() * candidates.length)];
-      state.visited.add(next.index);
-      state.cells[next.index].solveState = 'explored';
-      state.stack.push(next.index);
-      state.current = next.index;
-      return next.index;
-    }
+    const activeBranches = state.frontier.splice(0).sort((first, second) => {
+      const firstCost = this.estimatedCost(state, first);
+      const secondCost = this.estimatedCost(state, second);
+      return firstCost - secondCost || this.distanceToTarget(state, first) - this.distanceToTarget(state, second);
+    });
+    state.queued.clear();
+    activeBranches.forEach((current) => {
+      state.current = current;
+      state.visited.add(current);
+      state.cells[current].solveState = 'explored';
+    });
 
-    state.stack.pop();
-    state.current = state.stack[state.stack.length - 1] ?? 0;
-    return null;
+    activeBranches.forEach((current) => {
+      getNeighbours(current, state.columns, state.rows)
+        .filter((step) => !state.cells[current][step.direction] && !state.visited.has(step.index))
+        .forEach((step) => {
+          const nextCost = state.costs[current] + 1;
+          if (nextCost >= state.costs[step.index]) return;
+
+          state.costs[step.index] = nextCost;
+          state.parents[step.index] = current;
+          if (!state.queued.has(step.index)) {
+            state.frontier.push(step.index);
+            state.queued.add(step.index);
+          }
+        });
+    });
+    return activeBranches;
+  }
+
+  private estimatedCost(state: Maze, index: number) {
+    return state.costs[index] + this.distanceToTarget(state, index);
+  }
+
+  private distanceToTarget(state: Maze, index: number) {
+    const targetColumn = state.target % state.columns;
+    const targetRow = Math.floor(state.target / state.columns);
+    const column = index % state.columns;
+    const row = Math.floor(index / state.columns);
+    return Math.abs(targetColumn - column) + Math.abs(targetRow - row);
+  }
+
+  private buildRoute(state: Maze) {
+    const route: number[] = [];
+    for (let index = state.target; index !== -1; index = state.parents[index]) route.push(index);
+    return route.reverse();
   }
 
   private paintCells(state: Maze, indices: Iterable<number>) {
@@ -206,7 +256,7 @@ export class MazePreset implements LayeredBackgroundPreset {
   }
 
   private advance(state: Maze, frame: BackgroundFrame) {
-    if (state.solvedAt) {
+    if (state.solvedAt !== null) {
       if (frame.now - state.solvedAt > mazeRebuildDelay) {
         this.resize(frame);
         return;
@@ -223,16 +273,18 @@ export class MazePreset implements LayeredBackgroundPreset {
 
     if (frame.now - state.lastStepAt < mazeStepInterval) return;
     state.lastStepAt = frame.now;
-    if (state.current === state.target) {
+    const exploredIndices = this.advanceSolver(state);
+    if (!exploredIndices.length) return;
+    this.paintCells(state, exploredIndices);
+    if (exploredIndices.includes(state.target)) {
       state.solvedAt = frame.now;
+      state.stack = this.buildRoute(state);
       state.stack.forEach((index) => (state.cells[index].solveState = 'route'));
+      this.paintCells(state, [state.target]);
+      this._staticVersion += 1;
       return;
     }
-
-    const previousCurrent = state.current;
-    const exploredIndex = this.advanceSolver(state);
-    if (exploredIndex !== null) this.paintCells(state, [exploredIndex]);
-    if (exploredIndex !== null || state.current !== previousCurrent) this._staticVersion += 1;
+    this._staticVersion += 1;
   }
 }
 

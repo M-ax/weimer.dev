@@ -1,4 +1,4 @@
-export type PresetName = 'maze' | 'circuit' | 'constellation' | 'halvorsen';
+export type PresetName = 'maze' | 'circuit' | 'life' | 'constellation' | 'halvorsen';
 
 export interface BackgroundDimensions {
   width: number;
@@ -9,7 +9,7 @@ export interface BackgroundDimensions {
 export interface BackgroundFrame extends BackgroundDimensions {
   now: number;
   elapsed: number;
-  cursor?: { x: number; y: number };
+  cursor?: { x: number; y: number; speed: number };
 }
 
 export interface BackgroundPreset {

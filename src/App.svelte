@@ -31,7 +31,7 @@
   }
 
   function isPresetName(value: string | undefined): value is PresetName {
-    return value === 'maze' || value === 'circuit' || value === 'constellation' || value === 'halvorsen';
+    return value === 'maze' || value === 'circuit' || value === 'life' || value === 'constellation' || value === 'halvorsen';
   }
 
   function navigate(path: string) {

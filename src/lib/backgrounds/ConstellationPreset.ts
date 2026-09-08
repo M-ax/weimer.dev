@@ -1,10 +1,23 @@
 import type { BackgroundDimensions, BackgroundFrame, BackgroundPreset } from './types';
 
-interface Particle { x: number; y: number; dx: number; dy: number; size: number; }
+interface Vector { x: number; y: number; }
+interface Particle {
+  x: number;
+  y: number;
+  baseVelocity: Vector;
+  gravityVelocity: Vector;
+  size: number;
+}
 
 const connectionDistance = 145;
 const cursorRadius = 180;
 const cursorRadiusSquared = cursorRadius * cursorRadius;
+const gravityStrength = 2.8;
+const gravitySoftening = 55;
+const gravitySofteningSquared = gravitySoftening * gravitySoftening;
+const maxCursorSpeed = 2_400;
+const maxGravitySpeed = 1.4;
+const gravityRetentionPerFrame = 0.94;
 
 export class ConstellationPreset implements BackgroundPreset {
   readonly name = 'constellation' as const;
@@ -13,7 +26,11 @@ export class ConstellationPreset implements BackgroundPreset {
 
   resize({ width, height }: BackgroundDimensions) {
     this.particles = Array.from({ length: Math.max(42, Math.round((width * height) / 24000)) }, () => ({
-      x: Math.random() * width, y: Math.random() * height, dx: (Math.random() - 0.5) * 0.23, dy: (Math.random() - 0.5) * 0.23, size: 1 + Math.random() * 1.4,
+      x: Math.random() * width,
+      y: Math.random() * height,
+      baseVelocity: { x: (Math.random() - 0.5) * 0.23, y: (Math.random() - 0.5) * 0.23 },
+      gravityVelocity: { x: 0, y: 0 },
+      size: 1 + Math.random() * 1.4,
     }));
   }
 
@@ -22,10 +39,18 @@ export class ConstellationPreset implements BackgroundPreset {
     const particleCells = new Map<string, number[]>();
     for (let index = 0; index < this.particles.length; index += 1) {
       const particle = this.particles[index];
-      particle.x += particle.dx * movementScale;
-      particle.y += particle.dy * movementScale;
-      if (particle.x < 0 || particle.x > width) particle.dx *= -1;
-      if (particle.y < 0 || particle.y > height) particle.dy *= -1;
+      this.fadeGravity(particle, movementScale);
+      this.applyCursorGravity(particle, cursor, movementScale);
+      particle.x += (particle.baseVelocity.x + particle.gravityVelocity.x) * movementScale;
+      particle.y += (particle.baseVelocity.y + particle.gravityVelocity.y) * movementScale;
+      if (particle.x < 0 || particle.x > width) {
+        particle.baseVelocity.x *= -1;
+        particle.gravityVelocity.x *= -1;
+      }
+      if (particle.y < 0 || particle.y > height) {
+        particle.baseVelocity.y *= -1;
+        particle.gravityVelocity.y *= -1;
+      }
 
       const key = this.cellKey(particle.x, particle.y);
       const cell = particleCells.get(key);
@@ -93,6 +118,29 @@ export class ConstellationPreset implements BackgroundPreset {
 
   private cellKey(x: number, y: number) {
     return `${Math.floor(x / connectionDistance)}:${Math.floor(y / connectionDistance)}`;
+  }
+
+  private applyCursorGravity(particle: Particle, cursor: BackgroundFrame['cursor'], movementScale: number) {
+    if (!cursor || cursor.speed <= 0) return;
+
+    const horizontal = cursor.x - particle.x;
+    const vertical = cursor.y - particle.y;
+    const distanceSquared = horizontal * horizontal + vertical * vertical + gravitySofteningSquared;
+    const mass = Math.min(cursor.speed, maxCursorSpeed) / 1_000;
+    const force = gravityStrength * mass * movementScale / distanceSquared;
+    particle.gravityVelocity.x += horizontal * force;
+    particle.gravityVelocity.y += vertical * force;
+
+    const speed = Math.hypot(particle.gravityVelocity.x, particle.gravityVelocity.y);
+    if (speed <= maxGravitySpeed) return;
+    particle.gravityVelocity.x = particle.gravityVelocity.x / speed * maxGravitySpeed;
+    particle.gravityVelocity.y = particle.gravityVelocity.y / speed * maxGravitySpeed;
+  }
+
+  private fadeGravity(particle: Particle, movementScale: number) {
+    const retention = Math.pow(gravityRetentionPerFrame, movementScale);
+    particle.gravityVelocity.x *= retention;
+    particle.gravityVelocity.y *= retention;
   }
 
   private cursorIntensity(particle: Particle, cursor: BackgroundFrame['cursor']) {

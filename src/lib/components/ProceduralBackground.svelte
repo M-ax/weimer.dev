@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { CircuitPreset } from '../backgrounds/CircuitPreset';
   import { ConstellationPreset } from '../backgrounds/ConstellationPreset';
+  import { GameOfLifePreset } from '../backgrounds/GameOfLifePreset';
   import { HalvorsenPreset } from '../backgrounds/HalvorsenPreset';
   import { MazePreset, mazeStepInterval } from '../backgrounds/MazePreset';
   import type {
@@ -26,15 +27,20 @@
   let dynamicCanvas: HTMLCanvasElement;
   let transitionCanvas: HTMLCanvasElement;
   let canvasHeight = 0;
+  let presetMenuButton: HTMLButtonElement;
+  let presetMenuOpen = false;
 
   const presets: Record<PresetName, BackgroundPreset> = {
     maze: new MazePreset(),
     circuit: new CircuitPreset(),
+    life: new GameOfLifePreset(),
     constellation: new ConstellationPreset(),
     halvorsen: new HalvorsenPreset(),
   };
+  const presetNames: PresetName[] = ['maze', 'circuit', 'life', 'constellation', 'halvorsen'];
 
   let preset: BackgroundPreset = presets.maze;
+  let activatePreset = (_name: PresetName) => {};
 
   function randomPreset(): BackgroundPreset {
     const availablePresets = Object.values(presets);
@@ -46,6 +52,23 @@
       && 'prepareFrame' in candidate
       && 'drawStatic' in candidate
       && 'drawDynamic' in candidate;
+  }
+
+  function selectPreset(name: PresetName) {
+    activatePreset(name);
+    presetMenuOpen = false;
+  }
+
+  function closePresetMenuWhenFocusLeaves(event: FocusEvent) {
+    const picker = event.currentTarget as HTMLElement;
+    if (!picker.contains(event.relatedTarget as Node | null)) presetMenuOpen = false;
+  }
+
+  function handlePresetMenuKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+
+    presetMenuOpen = false;
+    presetMenuButton.focus();
   }
 
   onMount(() => {
@@ -67,7 +90,7 @@
     let transitionAnimation: Animation | null = null;
     let sizeAnimation: Animation | null = null;
     let transitionDimensions: BackgroundDimensions | null = null;
-    let cursor: { x: number; y: number } | undefined;
+    let cursor: { x: number; y: number; speed: number; observedAt: number } | undefined;
     let renderedStaticVersion = -1;
     let renderedStaticOffset = Number.NaN;
 
@@ -114,18 +137,52 @@
       backdrop.addColorStop(1, '#101222');
     };
 
+    const clearCanvas = (target: HTMLCanvasElement, targetContext: CanvasRenderingContext2D) => {
+      targetContext.setTransform(1, 0, 0, 1, 0, 0);
+      targetContext.clearRect(0, 0, target.width, target.height);
+    };
+
+    activatePreset = (name) => {
+      if (preset.name === name) return;
+
+      transitionAnimation?.cancel();
+      sizeAnimation?.cancel();
+      transitionAnimation = null;
+      sizeAnimation = null;
+      transitionDimensions = null;
+      transitionCanvas.style.opacity = '';
+      transitionCanvas.style.height = '';
+      clearCanvas(canvas, context);
+      clearCanvas(dynamicCanvas, dynamicContext);
+      const transitionContext = transitionCanvas.getContext('2d');
+      if (transitionContext) clearCanvas(transitionCanvas, transitionContext);
+
+      preset = presets[name];
+      preset.resize({ width, height, pixelRatio });
+      renderedStaticVersion = -1;
+      renderedStaticOffset = Number.NaN;
+      lastFrameAt = 0;
+      drawFrame(performance.now());
+    };
+
     const drawFrame = (now: number) => {
       const elapsed = lastFrameAt ? Math.min(now - lastFrameAt, 100) : mazeStepInterval;
       lastFrameAt = now;
       const scrollSmoothing = 1 - Math.pow(1 - 0.035, elapsed / mazeStepInterval);
       smoothedScroll += (scrollOffset - smoothedScroll) * scrollSmoothing;
+      const frameCursor = cursor && {
+        x: cursor.x,
+        y: cursor.y + smoothedScroll * parallaxFactor,
+        speed: cursor.speed,
+      };
+      if (cursor) cursor.speed = 0;
       const frame = {
         now,
         elapsed,
         width,
         height,
         pixelRatio,
-        cursor: cursor && { x: cursor.x, y: cursor.y + smoothedScroll * parallaxFactor },
+        cursor: frameCursor,
       };
       const staticOffset = -smoothedScroll * parallaxFactor;
 
@@ -260,8 +317,15 @@
     };
 
     const handlePointerMove = ({ clientX, clientY }: PointerEvent) => {
-      const bounds = background.getBoundingClientRect();
-      cursor = { x: clientX - bounds.left, y: clientY - bounds.top };
+      const bounds = canvasStack.getBoundingClientRect();
+      const observedAt = performance.now();
+      const nextCursor = {
+        x: (clientX - bounds.left) * width / bounds.width,
+        y: (clientY - bounds.top) * height / bounds.height,
+      };
+      const elapsed = cursor ? Math.max(observedAt - cursor.observedAt, 1) : 0;
+      const speed = cursor ? Math.hypot(nextCursor.x - cursor.x, nextCursor.y - cursor.y) / elapsed * 1_000 : 0;
+      cursor = { ...nextCursor, speed, observedAt };
     };
 
     const clearCursor = () => {
@@ -278,6 +342,7 @@
     window.addEventListener('blur', clearCursor);
 
     return () => {
+      activatePreset = (_name: PresetName) => {};
       observer.disconnect();
       pauseAnimation();
       transitionAnimation?.cancel();
@@ -299,7 +364,47 @@
 </div>
 
 {#if showLabel}
-  <a class="background-link" href={`/background/${preset.name}`} aria-label={`View ${preset.label} without filters`}>{preset.label} · live</a>
+  <div class="background-control">
+    <a class="background-page-link" href={`/background/${preset.name}`} aria-label={`View ${preset.label} without filters`}>
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M6.2 9.8 9.8 6.2M5.1 12.8l-1.5 1.5a2.55 2.55 0 1 1-3.6-3.6L3.4 7.3a2.55 2.55 0 0 1 3.6 0M10.9 3.2l1.5-1.5a2.55 2.55 0 0 1 3.6 3.6l-3.4 3.4a2.55 2.55 0 0 1-3.6 0" />
+      </svg>
+    </a>
+    <div
+      class="background-picker"
+      role="group"
+      aria-label="Background selector"
+      onfocusout={closePresetMenuWhenFocusLeaves}
+    >
+      <button
+        class="background-picker-button"
+        type="button"
+        bind:this={presetMenuButton}
+        aria-controls="background-preset-menu"
+        aria-expanded={presetMenuOpen}
+        aria-haspopup="menu"
+        onclick={() => presetMenuOpen = !presetMenuOpen}
+        onkeydown={handlePresetMenuKeydown}
+      >
+        <span>{preset.label} · live</span>
+        <span class="preset-menu-arrow" aria-hidden="true">↑</span>
+      </button>
+      {#if presetMenuOpen}
+        <div id="background-preset-menu" class="background-preset-menu" role="menu" aria-label="Background presets">
+          {#each presetNames as name}
+            <button
+              class:active={preset.name === name}
+              type="button"
+              role="menuitem"
+              aria-current={preset.name === name ? 'true' : undefined}
+              onclick={() => selectPreset(name)}
+              onkeydown={handlePresetMenuKeydown}
+            >{presets[name].label}</button>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -348,25 +453,106 @@
     pointer-events: none;
   }
 
-  .background-link {
+  .background-control {
     position: fixed;
     z-index: 2;
     right: 1.5rem;
     bottom: 1.25rem;
+    display: flex;
+    align-items: center;
     color: rgba(220, 244, 239, 0.54);
     font: 500 0.65rem/1 var(--font-mono);
     letter-spacing: 0.09em;
     pointer-events: auto;
-    text-decoration: none;
     text-transform: uppercase;
   }
 
-  .background-link:hover {
+  .background-page-link {
+    display: grid;
+    width: 1.2rem;
+    height: 1.2rem;
+    place-items: center;
+    margin-right: 0.55rem;
+    border-right: 1px solid rgba(220, 244, 239, 0.25);
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .background-page-link svg {
+    width: 0.73rem;
+    height: 0.73rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.35;
+  }
+
+  .background-picker {
+    position: relative;
+  }
+
+  .background-picker-button,
+  .background-preset-menu button {
+    border: 0;
+    padding: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+  }
+
+  .background-picker-button {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+  }
+
+  .preset-menu-arrow {
+    color: var(--accent);
+    font-size: 0.82rem;
+    line-height: 0.8;
+  }
+
+  .background-preset-menu {
+    position: absolute;
+    right: -0.45rem;
+    bottom: calc(100% + 0.65rem);
+    display: grid;
+    min-width: max-content;
+    gap: 0.15rem;
+    border: 1px solid rgba(220, 244, 239, 0.22);
+    padding: 0.4rem;
+    background: rgba(7, 21, 26, 0.92);
+    box-shadow: 0 0.6rem 1.8rem rgba(0, 0, 0, 0.22);
+  }
+
+  .background-preset-menu button {
+    padding: 0.42rem 0.5rem;
+    color: rgba(220, 244, 239, 0.55);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .background-page-link:hover,
+  .background-picker-button:hover,
+  .background-picker-button:focus-visible,
+  .background-preset-menu button:hover,
+  .background-preset-menu button:focus-visible,
+  .background-preset-menu button.active {
     color: rgba(220, 244, 239, 0.82);
   }
 
+  .background-picker-button:focus-visible,
+  .background-preset-menu button:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 0.28rem;
+  }
+
   @media (max-width: 640px) {
-    .background-link {
+    .background-control {
       right: 1rem;
       bottom: 0.9rem;
     }

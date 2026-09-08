@@ -174,6 +174,7 @@
         x: cursor.x,
         y: cursor.y + smoothedScroll * parallaxFactor,
         speed: cursor.speed,
+        idleDuration: Math.max(0, now - cursor.observedAt),
       };
       if (cursor) cursor.speed = 0;
       const frame = {

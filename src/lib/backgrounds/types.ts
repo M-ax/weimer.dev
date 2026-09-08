@@ -9,7 +9,7 @@ export interface BackgroundDimensions {
 export interface BackgroundFrame extends BackgroundDimensions {
   now: number;
   elapsed: number;
-  cursor?: { x: number; y: number; speed: number };
+  cursor?: { x: number; y: number; speed: number; idleDuration: number };
 }
 
 export interface BackgroundPreset {

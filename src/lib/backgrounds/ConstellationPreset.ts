@@ -1,15 +1,25 @@
 import type { BackgroundDimensions, BackgroundFrame, BackgroundPreset } from './types';
 
 interface Vector { x: number; y: number; }
+interface CometTrailPoint { x: number; y: number; age: number; }
 interface Particle {
   x: number;
   y: number;
   baseVelocity: Vector;
   gravityVelocity: Vector;
   size: number;
+  cometTrail: CometTrailPoint[];
+  explosionFrames: number;
+  hasExploded: boolean;
 }
 
 const connectionDistance = 145;
+const clumpDistance = 35;
+const clumpDistanceSquared = clumpDistance * clumpDistance;
+const clumpThreshold = 5;
+const explosionRadius = 70;
+const explosionRadiusSquared = explosionRadius * explosionRadius;
+const explosionIdleDelay = 100;
 const cursorRadius = 180;
 const cursorRadiusSquared = cursorRadius * cursorRadius;
 const gravityStrength = 2.8;
@@ -18,6 +28,12 @@ const gravitySofteningSquared = gravitySoftening * gravitySoftening;
 const maxCursorSpeed = 2_400;
 const maxGravitySpeed = 1.4;
 const gravityRetentionPerFrame = 0.94;
+const explosionGravityRetentionPerFrame = 0.998;
+const explosionVelocityMultiplier = 48;
+const maximumCompactnessMultiplier = 3;
+const fallbackExplosionSpeed = 0.8;
+const explosionFrames = 42;
+const cometTrailLifetime = 96;
 
 export class ConstellationPreset implements BackgroundPreset {
   readonly name = 'constellation' as const;
@@ -31,16 +47,24 @@ export class ConstellationPreset implements BackgroundPreset {
       baseVelocity: { x: (Math.random() - 0.5) * 0.23, y: (Math.random() - 0.5) * 0.23 },
       gravityVelocity: { x: 0, y: 0 },
       size: 1 + Math.random() * 1.4,
+      cometTrail: [],
+      explosionFrames: 0,
+      hasExploded: false,
     }));
   }
 
   draw(context: CanvasRenderingContext2D, { width, height, elapsed, cursor }: BackgroundFrame) {
     const movementScale = elapsed / (1_000 / 60);
+    for (const particle of this.particles) {
+      this.fadeGravity(particle, movementScale);
+      this.applyCursorGravity(particle, cursor, movementScale);
+    }
+    if (!cursor || cursor.idleDuration >= explosionIdleDelay) this.explodeLargeClumps(this.createParticleCells());
+
     const particleCells = new Map<string, number[]>();
     for (let index = 0; index < this.particles.length; index += 1) {
       const particle = this.particles[index];
-      this.fadeGravity(particle, movementScale);
-      this.applyCursorGravity(particle, cursor, movementScale);
+      this.updateCometTrail(particle, movementScale);
       particle.x += (particle.baseVelocity.x + particle.gravityVelocity.x) * movementScale;
       particle.y += (particle.baseVelocity.y + particle.gravityVelocity.y) * movementScale;
       if (particle.x < 0 || particle.x > width) {
@@ -57,6 +81,8 @@ export class ConstellationPreset implements BackgroundPreset {
       if (cell) cell.push(index);
       else particleCells.set(key, [index]);
     }
+    this.drawCometTrails(context);
+
     const candidates: number[] = [];
     for (let first = 0; first < this.particles.length; first += 1) {
       const firstParticle = this.particles[first];
@@ -76,6 +102,8 @@ export class ConstellationPreset implements BackgroundPreset {
 
       candidates.sort((left, right) => left - right);
       for (const second of candidates) {
+        if (this.isExploding(this.particles[first]) || this.isExploding(this.particles[second])) continue;
+
         const horizontal = this.particles[first].x - this.particles[second].x;
         const vertical = this.particles[first].y - this.particles[second].y;
         if (horizontal * horizontal + vertical * vertical > connectionDistance * connectionDistance) continue;
@@ -120,8 +148,191 @@ export class ConstellationPreset implements BackgroundPreset {
     return `${Math.floor(x / connectionDistance)}:${Math.floor(y / connectionDistance)}`;
   }
 
+  private createParticleCells() {
+    const cells = new Map<string, number[]>();
+    for (let index = 0; index < this.particles.length; index += 1) {
+      const particle = this.particles[index];
+      const key = this.cellKey(particle.x, particle.y);
+      const cell = cells.get(key);
+      if (cell) cell.push(index);
+      else cells.set(key, [index]);
+    }
+    return cells;
+  }
+
+  private explodeLargeClumps(cells: Map<string, number[]>) {
+    const visited = new Set<number>();
+    for (let index = 0; index < this.particles.length; index += 1) {
+      if (visited.has(index)) continue;
+
+      const clump = this.collectClump(index, cells, visited);
+      if (clump.length <= clumpThreshold) {
+        for (const particleIndex of clump) this.particles[particleIndex].hasExploded = false;
+        continue;
+      }
+      if (clump.some((particleIndex) => this.particles[particleIndex].hasExploded)) continue;
+
+      const center = clump.reduce(
+        (total, particleIndex) => ({
+          x: total.x + this.particles[particleIndex].x,
+          y: total.y + this.particles[particleIndex].y,
+        }),
+        {x: 0, y: 0},
+      );
+      center.x /= clump.length;
+      center.y /= clump.length;
+      this.explodeParticlesNear(center, this.explosionPower(clump, center));
+    }
+  }
+
+  private explosionPower(clump: number[], center: Vector) {
+    const radius = clump.reduce((largestDistance, particleIndex) => Math.max(
+      largestDistance,
+      Math.hypot(
+        this.particles[particleIndex].x - center.x,
+        this.particles[particleIndex].y - center.y,
+      ),
+    ), 0);
+    const compactnessMultiplier = Math.min(
+      maximumCompactnessMultiplier,
+      Math.max(1, clumpDistance / Math.max(radius, 1)),
+    );
+    return explosionVelocityMultiplier * compactnessMultiplier;
+  }
+
+  private explodeParticlesNear(center: Vector, explosionPower: number) {
+    for (let particleIndex = 0; particleIndex < this.particles.length; particleIndex += 1) {
+      const particle = this.particles[particleIndex];
+      const horizontal = particle.x - center.x;
+      const vertical = particle.y - center.y;
+      if (horizontal * horizontal + vertical * vertical > explosionRadiusSquared) continue;
+      this.explodeParticle(particle, center, particleIndex, explosionPower);
+    }
+  }
+
+  private collectClump(startIndex: number, cells: Map<string, number[]>, visited: Set<number>) {
+    const clump: number[] = [];
+    const pending = [startIndex];
+    visited.add(startIndex);
+
+    while (pending.length) {
+      const particleIndex = pending.pop()!;
+      const particle = this.particles[particleIndex];
+      clump.push(particleIndex);
+      const cellX = Math.floor(particle.x / connectionDistance);
+      const cellY = Math.floor(particle.y / connectionDistance);
+
+      for (let rowOffset = -1; rowOffset <= 1; rowOffset += 1) {
+        for (let columnOffset = -1; columnOffset <= 1; columnOffset += 1) {
+          const cell = cells.get(`${cellX + columnOffset}:${cellY + rowOffset}`);
+          if (!cell) continue;
+          for (const otherIndex of cell) {
+            if (visited.has(otherIndex)) continue;
+            const other = this.particles[otherIndex];
+            const horizontal = particle.x - other.x;
+            const vertical = particle.y - other.y;
+            if (horizontal * horizontal + vertical * vertical > clumpDistanceSquared) continue;
+            visited.add(otherIndex);
+            pending.push(otherIndex);
+          }
+        }
+      }
+    }
+
+    return clump;
+  }
+
+  private explodeParticle(particle: Particle, center: Vector, particleIndex: number, explosionPower: number) {
+    if (this.isExploding(particle)) return;
+
+    const gravitySpeed = Math.hypot(particle.gravityVelocity.x, particle.gravityVelocity.y);
+    let horizontal = particle.x - center.x;
+    let vertical = particle.y - center.y;
+    const distance = Math.hypot(horizontal, vertical);
+    if (distance) {
+      horizontal /= distance;
+      vertical /= distance;
+    } else {
+      const angle = particleIndex * 2.399963229728653;
+      horizontal = Math.cos(angle);
+      vertical = Math.sin(angle);
+    }
+    const launchSpeed = Math.max(gravitySpeed, fallbackExplosionSpeed) * explosionPower;
+    particle.gravityVelocity.x = horizontal * launchSpeed;
+    particle.gravityVelocity.y = vertical * launchSpeed;
+    particle.cometTrail = [];
+    particle.explosionFrames = explosionFrames;
+    particle.hasExploded = true;
+  }
+
+  private updateCometTrail(particle: Particle, movementScale: number) {
+    const trail = particle.cometTrail ??= [];
+    for (const point of trail) point.age = (point.age ?? 0) + movementScale;
+    particle.cometTrail = trail.filter((point) => point.age < cometTrailLifetime);
+
+    const remainingFrames = particle.explosionFrames ?? 0;
+    if (remainingFrames <= 0) return;
+
+    particle.cometTrail.unshift({x: particle.x, y: particle.y, age: 0});
+    particle.explosionFrames = Math.max(0, remainingFrames - movementScale);
+  }
+
+  private drawCometTrails(context: CanvasRenderingContext2D) {
+    for (const particle of this.particles) {
+      const trail = particle.cometTrail;
+      if (!trail.length) continue;
+
+      const isExploding = this.isExploding(particle);
+      let from = isExploding ? particle : trail[0];
+      const points = isExploding ? trail : trail.slice(1);
+      let visibleSegmentIndex = 0;
+      for (let pointIndex = 0; pointIndex < points.length; pointIndex += 1) {
+        const point = points[pointIndex];
+        const opacity = 0.7 * Math.pow(Math.max(0, 1 - (point.age ?? 0) / cometTrailLifetime), 4);
+        context.strokeStyle = `rgba(220, 197, 255, ${opacity})`;
+        context.lineWidth = particle.size;
+        context.beginPath();
+        context.moveTo(from.x, from.y);
+        context.lineTo(point.x, point.y);
+        context.stroke();
+        const hasLength = from.x !== point.x || from.y !== point.y;
+        if (hasLength && visibleSegmentIndex % 3 === 0) {
+          this.drawCometSparkle(context, particle.size, from, point, visibleSegmentIndex, opacity);
+        }
+        if (hasLength) {
+          visibleSegmentIndex += 1;
+        }
+        from = point;
+      }
+    }
+    context.lineWidth = 1;
+  }
+
+  private drawCometSparkle(
+    context: CanvasRenderingContext2D,
+    particleSize: number,
+    from: Vector,
+    to: CometTrailPoint,
+    pointIndex: number,
+    opacity: number,
+  ) {
+    const horizontal = to.x - from.x;
+    const vertical = to.y - from.y;
+    const distance = Math.hypot(horizontal, vertical);
+    if (!distance) return;
+
+    const side = (pointIndex + Math.floor((to.age ?? 0) / 8)) % 2 ? -1 : 1;
+    const offset = particleSize * (1.2 + (pointIndex % 3) * 0.35) * side;
+    const x = (from.x + to.x) / 2 - vertical / distance * offset;
+    const y = (from.y + to.y) / 2 + horizontal / distance * offset;
+    context.fillStyle = `rgba(255, 239, 255, ${opacity * 0.85})`;
+    context.beginPath();
+    context.arc(x, y, particleSize * (0.5 + opacity * 0.5), 0, Math.PI * 2);
+    context.fill();
+  }
+
   private applyCursorGravity(particle: Particle, cursor: BackgroundFrame['cursor'], movementScale: number) {
-    if (!cursor || cursor.speed <= 0) return;
+    if (this.isExploding(particle) || !cursor || cursor.speed <= 0) return;
 
     const horizontal = cursor.x - particle.x;
     const vertical = cursor.y - particle.y;
@@ -138,9 +349,16 @@ export class ConstellationPreset implements BackgroundPreset {
   }
 
   private fadeGravity(particle: Particle, movementScale: number) {
-    const retention = Math.pow(gravityRetentionPerFrame, movementScale);
+    const retention = Math.pow(
+      this.isExploding(particle) ? explosionGravityRetentionPerFrame : gravityRetentionPerFrame,
+      movementScale,
+    );
     particle.gravityVelocity.x *= retention;
     particle.gravityVelocity.y *= retention;
+  }
+
+  private isExploding(particle: Particle) {
+    return particle.explosionFrames > 0;
   }
 
   private cursorIntensity(particle: Particle, cursor: BackgroundFrame['cursor']) {

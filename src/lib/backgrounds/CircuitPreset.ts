@@ -2,6 +2,7 @@ import type {BackgroundDimensions, BackgroundFrame, LayeredBackgroundPreset} fro
 
 type PinSide = 'top' | 'right' | 'bottom' | 'left';
 type CpuCorner = 'top-left' | 'top-right' | 'bottom-right' | 'bottom-left';
+type DipRotation = 0 | 90 | 180 | 270;
 
 interface CircuitPoint {
     x: number;
@@ -13,17 +14,21 @@ type CircuitRenderContext = CanvasRenderingContext2D | OffscreenCanvasRenderingC
 interface CircuitPin extends CircuitPoint {
     side: PinSide;
     used: boolean;
+    state: number;
 }
 
 interface CircuitComponent {
-    kind: 'cpu' | 'dip';
+    kind: 'cpu' | 'dip' | 'big_dip' | 'display';
     x: number;
     y: number;
     width: number;
     height: number;
     label: string;
     markerCorner?: CpuCorner;
+    rotation?: DipRotation;
     pins: CircuitPin[];
+    displayValues?: number[];
+    displayUpdatedAt?: number;
 }
 
 interface CircuitWire {
@@ -32,10 +37,12 @@ interface CircuitWire {
     totalLength: number;
     phase: number;
     isBus: boolean;
+    pulseDirection: -1 | 1;
     fromComponent: CircuitComponent;
     toComponent: CircuitComponent;
     fromPin: CircuitPin;
     toPin: CircuitPin;
+    lastPulseCycle: number;
 }
 
 type CircuitLifecyclePhase = 'lifting' | 'erasing' | 'lowering' | 'growing';
@@ -65,6 +72,9 @@ export class CircuitPreset implements LayeredBackgroundPreset {
     private readonly lifecycleInterval = 12_000;
     private readonly componentTransitionDuration = 900;
     private readonly wireTransitionDuration = 1_750;
+    private readonly pinStateChange = 0.08;
+    private readonly displayGridSize = 8;
+    private readonly displayTransitionDuration = 550;
     private components: CircuitComponent[] = [];
     private wires: CircuitWire[] = [];
     private staticLayer: HTMLCanvasElement | OffscreenCanvas | null = null;
@@ -85,6 +95,9 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         const area = width * height;
         const cpuCount = Math.max(2, Math.min(5, Math.ceil(area / 520_000)));
         const dipCount = Math.max(4, Math.min(15, Math.ceil(area / 125_000)));
+        const bigDipCount = Math.max(1, Math.min(3, Math.ceil(area / 500_000)));
+        const regularDipCount = Math.max(2, dipCount - bigDipCount);
+        const displayCount = Math.max(1, Math.min(3, Math.ceil(area / 600_000)));
 
         this.components = [];
         this.wires = [];
@@ -97,10 +110,20 @@ export class CircuitPreset implements LayeredBackgroundPreset {
             const component = this.createCpu(scale, random);
             if (this.placeComponent(component, width, height, random)) this.components.push(component);
         }
-        for (let index = 0; index < dipCount; index += 1) {
+        for (let index = 0; index < regularDipCount; index += 1) {
             const component = this.createDip(scale, random);
             if (this.placeComponent(component, width, height, random)) this.components.push(component);
         }
+        for (let index = 0; index < bigDipCount; index += 1) {
+            const component = this.createBigDip(scale, random);
+            if (this.placeComponent(component, width, height, random)) this.components.push(component);
+        }
+        for (let index = 0; index < displayCount; index += 1) {
+            const display = this.createDisplay(scale, random);
+            if (this.placeComponent(display, width, height, random)) this.components.push(display);
+        }
+
+        this.connectUnconnectedComponents(random);
 
         const pairedComponents = new Set<string>();
         const cpus = this.components.filter((component) => component.kind === 'cpu');
@@ -115,7 +138,7 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         });
 
         cpus.forEach((cpu, index) => {
-            for (let connection = 0; connection < 5; connection += 1) {
+            for (let connection = 0; connection < 7; connection += 1) {
                 const neighbor = this.nearestComponents(cpu).find((component, neighborIndex) =>
                     neighborIndex >= connection % 2 && this.hasFreeFacingPins(cpu, component),
                 );
@@ -126,11 +149,12 @@ export class CircuitPreset implements LayeredBackgroundPreset {
 
         this.components.forEach((component, index) => {
             const neighbors = this.nearestComponents(component);
-            for (let connection = 0; connection < 2; connection += 1) {
+            for (let connection = 0; connection < 3; connection += 1) {
                 const neighbor = neighbors[(index + connection) % Math.min(neighbors.length, 3)];
                 if (neighbor) this.connectPins(component, neighbor, random);
             }
         });
+        this.connectUnconnectedComponents(random);
 
         this.renderStaticLayer(width, height, pixelRatio);
     }
@@ -143,6 +167,7 @@ export class CircuitPreset implements LayeredBackgroundPreset {
 
     prepareFrame({now}: BackgroundFrame) {
         this.advanceLifecycle(now);
+        this.advancePinStates(now);
     }
 
     drawStatic(context: CanvasRenderingContext2D, {width, height}: BackgroundFrame) {
@@ -158,6 +183,11 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         const lifecycleWires = this.lifecycle?.wireSet;
         this.wires.forEach((wire) => {
             if (!lifecycleWires?.has(wire)) this.drawPulse(context, wire, now);
+        });
+        this.components.forEach((component) => {
+            if (component.kind === 'display' && !this.lifecycle?.components.includes(component)) {
+                this.drawDisplayGrid(context, component, now);
+            }
         });
         context.restore();
     }
@@ -179,10 +209,10 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         const pinsPerSide = 4;
         for (let index = 0; index < pinsPerSide; index += 1) {
             component.pins.push(
-                {x: 0, y: 0, side: 'top', used: false},
-                {x: 0, y: 0, side: 'right', used: false},
-                {x: 0, y: 0, side: 'bottom', used: false},
-                {x: 0, y: 0, side: 'left', used: false},
+                this.createPin('top', random),
+                this.createPin('right', random),
+                this.createPin('bottom', random),
+                this.createPin('left', random),
             );
         }
         this.positionPins(component);
@@ -190,26 +220,84 @@ export class CircuitPreset implements LayeredBackgroundPreset {
     }
 
     private createDip(scale: number, random: () => number): CircuitComponent {
-        const pinRows = 4 + Math.floor(random() * 3);
-        const width = this.gridSize * Math.max(3, Math.round((3.5 + random()) * scale));
-        const height = this.gridSize * (pinRows + 2);
+        const pinRows = 5 + Math.floor(random() * 3);
+        const baseWidth = this.gridSize * Math.max(3, Math.round((3.5 + random()) * scale));
+        const baseHeight = this.gridSize * (pinRows + 1);
+        const rotation = Math.floor(random() * 4) * 90 as DipRotation;
+        const isSideways = rotation === 90 || rotation === 270;
         const component: CircuitComponent = {
             kind: 'dip',
             x: 0,
             y: 0,
-            width,
-            height,
+            width: isSideways ? baseHeight : baseWidth,
+            height: isSideways ? baseWidth : baseHeight,
             label: this.createPartNumber('dip', random),
+            rotation,
             pins: [],
         };
         for (let row = 0; row < pinRows; row += 1) {
             component.pins.push(
-                {x: 0, y: 0, side: 'left', used: false},
-                {x: 0, y: 0, side: 'right', used: false},
+                this.createPin('left', random),
+                this.createPin('right', random),
             );
         }
         this.positionPins(component);
         return component;
+    }
+
+    private createBigDip(scale: number, random: () => number): CircuitComponent {
+        const pinRows = 4 + Math.floor(random() * 3);
+        const baseWidth = this.gridSize * Math.max(3, Math.round((3.5 + random()) * scale));
+        const baseHeight = this.gridSize * (pinRows * 2 + 3);
+        const rotation = Math.floor(random() * 4) * 90 as DipRotation;
+        const isSideways = rotation === 90 || rotation === 270;
+        const component: CircuitComponent = {
+            kind: 'big_dip',
+            x: 0,
+            y: 0,
+            width: isSideways ? baseHeight : baseWidth,
+            height: isSideways ? baseWidth : baseHeight,
+            label: this.createPartNumber('big_dip', random),
+            rotation,
+            pins: [],
+        };
+        for (let bank = 0; bank < 2; bank += 1) {
+            for (let row = 0; row < pinRows; row += 1) {
+                component.pins.push(
+                    this.createPin('left', random),
+                    this.createPin('right', random),
+                );
+            }
+        }
+        this.positionPins(component);
+        return component;
+    }
+
+    private createDisplay(scale: number, random: () => number): CircuitComponent {
+        const size = this.gridSize * Math.max(7, Math.round(8 * scale));
+        const component: CircuitComponent = {
+            kind: 'display',
+            x: 0,
+            y: 0,
+            width: size,
+            height: size,
+            label: 'DISPLAY',
+            pins: [],
+        };
+        for (let index = 0; index < 3; index += 1) {
+            component.pins.push(
+                this.createPin('top', random),
+                this.createPin('right', random),
+                this.createPin('bottom', random),
+                this.createPin('left', random),
+            );
+        }
+        this.positionPins(component);
+        return component;
+    }
+
+    private createPin(side: PinSide, random: () => number): CircuitPin {
+        return {x: 0, y: 0, side, used: false, state: random()};
     }
 
     private createPartNumber(kind: CircuitComponent['kind'], random: () => number) {
@@ -241,41 +329,93 @@ export class CircuitPreset implements LayeredBackgroundPreset {
     }
 
     private positionPins(component: CircuitComponent) {
-        if (component.kind === 'cpu') {
+        if (component.kind !== 'dip' && component.kind !== 'big_dip') {
             const pinsPerSide = component.pins.length / 4;
             for (let index = 0; index < pinsPerSide; index += 1) {
-                const horizontal = component.x + this.pinOffset(component.width, index, pinsPerSide);
-                const vertical = component.y + this.pinOffset(component.height, index, pinsPerSide);
+                const pinOffset = component.kind === 'display'
+                    ? this.centeredPinOffset
+                    : this.pinOffset;
+                const horizontal = component.x + pinOffset.call(this, component.width, index, pinsPerSide);
+                const vertical = component.y + pinOffset.call(this, component.height, index, pinsPerSide);
                 const pinIndex = index * 4;
-                component.pins[pinIndex] = {x: horizontal, y: component.y, side: 'top', used: false};
-                component.pins[pinIndex + 1] = {
-                    x: component.x + component.width,
-                    y: vertical,
-                    side: 'right',
-                    used: false
-                };
-                component.pins[pinIndex + 2] = {
-                    x: horizontal,
-                    y: component.y + component.height,
-                    side: 'bottom',
-                    used: false
-                };
-                component.pins[pinIndex + 3] = {x: component.x, y: vertical, side: 'left', used: false};
+                this.positionPin(component.pins[pinIndex], horizontal, component.y);
+                this.positionPin(component.pins[pinIndex + 1], component.x + component.width, vertical);
+                this.positionPin(component.pins[pinIndex + 2], horizontal, component.y + component.height);
+                this.positionPin(component.pins[pinIndex + 3], component.x, vertical);
             }
             return;
         }
 
-        const pinRows = component.pins.length / 2;
-        for (let row = 0; row < pinRows; row += 1) {
-            const vertical = component.y + (row + 1) * this.gridSize;
-            component.pins[row * 2] = {x: component.x, y: vertical, side: 'left', used: false};
-            component.pins[row * 2 + 1] = {
-                x: component.x + component.width,
-                y: vertical,
-                side: 'right',
-                used: false
-            };
+        const bankCount = component.kind === 'big_dip' ? 2 : 1;
+        const pinRows = component.pins.length / (bankCount * 2);
+        const {width, height} = this.dipBaseDimensions(component);
+        for (let bank = 0; bank < bankCount; bank += 1) {
+            for (let row = 0; row < pinRows; row += 1) {
+                const vertical = bank === 0
+                    ? (row + 1) * this.gridSize
+                    : height - (pinRows - row) * this.gridSize;
+                const pinIndex = (bank * pinRows + row) * 2;
+                this.positionDipPin(component, component.pins[pinIndex], {x: 0, y: vertical}, 'left');
+                this.positionDipPin(component, component.pins[pinIndex + 1], {x: width, y: vertical}, 'right');
+            }
         }
+    }
+
+    private positionDipPin(
+        component: CircuitComponent,
+        pin: CircuitPin,
+        point: CircuitPoint,
+        side: PinSide,
+    ) {
+        const rotatedPoint = this.rotateDipPoint(component, point);
+        this.positionPin(
+            pin,
+            component.x + rotatedPoint.x,
+            component.y + rotatedPoint.y,
+            this.rotateDipSide(side, component.rotation ?? 0),
+        );
+    }
+
+    private positionPin(pin: CircuitPin, x: number, y: number, side = pin.side) {
+        pin.x = x;
+        pin.y = y;
+        pin.side = side;
+        pin.used = false;
+    }
+
+    private dipBaseDimensions(component: CircuitComponent) {
+        const isSideways = component.rotation === 90 || component.rotation === 270;
+        return {
+            width: isSideways ? component.height : component.width,
+            height: isSideways ? component.width : component.height,
+        };
+    }
+
+    private rotateDipPoint(component: CircuitComponent, {x, y}: CircuitPoint): CircuitPoint {
+        const {width, height} = this.dipBaseDimensions(component);
+        switch (component.rotation ?? 0) {
+            case 90: {
+                const rotatedPosition = [height - y, x];
+                return {x: rotatedPosition[0], y: rotatedPosition[1]};
+            }
+            case 180: {
+                const horizontal = width - x;
+                const vertical = height - y;
+                return {x: horizontal, y: vertical};
+            }
+            case 270: {
+                const horizontal = y;
+                const vertical = width - x;
+                return {x: horizontal, y: vertical};
+            }
+            default:
+                return {x, y};
+        }
+    }
+
+    private rotateDipSide(side: PinSide, rotation: DipRotation): PinSide {
+        const sides: PinSide[] = ['top', 'right', 'bottom', 'left'];
+        return sides[(sides.indexOf(side) + rotation / 90) % sides.length];
     }
 
     private nearestComponents(component: CircuitComponent) {
@@ -298,6 +438,22 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         return [this.components.indexOf(left), this.components.indexOf(right)].sort((a, b) => a - b).join(':');
     }
 
+    private connectUnconnectedComponents(random: () => number) {
+        this.components.forEach((component) => {
+            if (this.wires.some((wire) => wire.fromComponent === component || wire.toComponent === component)) return;
+
+            const neighbors = this.nearestComponents(component);
+            for (const neighbor of neighbors) {
+                if (this.connectPins(component, neighbor, random)) break;
+            }
+            if (this.wires.some((wire) => wire.fromComponent === component || wire.toComponent === component)) return;
+
+            for (const neighbor of neighbors) {
+                if (this.connectPinsWithAlternateSides(component, neighbor, random)) break;
+            }
+        });
+    }
+
     private hasFreeFacingPins(from: CircuitComponent, to: CircuitComponent) {
         const fromSide = this.facingSide(from, to);
         const toSide = this.oppositeSide(fromSide);
@@ -314,8 +470,9 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         for (const fromPins of this.adjacentPinGroups(from, fromSide, count)) {
             for (const toPins of this.adjacentPinGroups(to, toSide, count)) {
                 if (!this.hasBusClearance(fromPins, toPins, count)) continue;
+                const pulseDirection = random() < 0.5 ? 1 : -1;
                 const wires = fromPins.map((pin, index) =>
-                    this.createWire(from, pin, to, toPins[index], random(), true, index, count),
+                    this.createWire(from, pin, to, toPins[index], random(), true, index, count, pulseDirection),
                 );
                 if (!this.canAddWires(wires, [from, to])) continue;
 
@@ -352,9 +509,34 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         if (!to) return false;
         const fromSide = this.facingSide(from, to);
         const toSide = this.oppositeSide(fromSide);
+        return this.connectPinsOnSides(from, fromSide, to, toSide, random);
+    }
+
+    private connectPinsWithAlternateSides(from: CircuitComponent, to: CircuitComponent, random: () => number) {
+        const primaryFromSide = this.facingSide(from, to);
+        const primaryToSide = this.oppositeSide(primaryFromSide);
+        const sides: PinSide[] = ['top', 'right', 'bottom', 'left'];
+
+        for (const fromSide of sides) {
+            for (const toSide of sides) {
+                if (fromSide === primaryFromSide && toSide === primaryToSide) continue;
+                if (this.connectPinsOnSides(from, fromSide, to, toSide, random)) return true;
+            }
+        }
+        return false;
+    }
+
+    private connectPinsOnSides(
+        from: CircuitComponent,
+        fromSide: PinSide,
+        to: CircuitComponent,
+        toSide: PinSide,
+        random: () => number,
+    ) {
         for (const [fromPin] of this.adjacentPinGroups(from, fromSide, 1)) {
             for (const [toPin] of this.adjacentPinGroups(to, toSide, 1)) {
-                const wire = this.createWire(from, fromPin, to, toPin, random(), false, 0, 1);
+                const pulseDirection = random() < 0.5 ? 1 : -1;
+                const wire = this.createWire(from, fromPin, to, toPin, random(), false, 0, 1, pulseDirection);
                 if (!this.canAddWires([wire], [from, to])) continue;
 
                 fromPin.used = true;
@@ -401,6 +583,7 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         isBus: boolean,
         index: number,
         count: number,
+        pulseDirection: -1 | 1,
     ): CircuitWire {
         const fromDirection = this.sideDirection(from.side);
         const toDirection = this.sideDirection(to.side);
@@ -421,6 +604,7 @@ export class CircuitPreset implements LayeredBackgroundPreset {
                 from,
                 toComponent,
                 to,
+                pulseDirection,
             );
         }
         const laneDirection = horizontalDirection === 0 ? 1 : -horizontalDirection * verticalDirection;
@@ -433,6 +617,7 @@ export class CircuitPreset implements LayeredBackgroundPreset {
             from,
             toComponent,
             to,
+            pulseDirection,
         );
     }
 
@@ -444,6 +629,7 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         fromPin: CircuitPin,
         toComponent: CircuitComponent,
         toPin: CircuitPin,
+        pulseDirection: -1 | 1,
     ): CircuitWire {
         const segmentLengths = points.slice(1).map((point, index) =>
             Math.hypot(point.x - points[index].x, point.y - points[index].y),
@@ -454,11 +640,25 @@ export class CircuitPreset implements LayeredBackgroundPreset {
             totalLength: segmentLengths.reduce((total, length) => total + length, 0),
             phase,
             isBus,
+            pulseDirection,
             fromComponent,
             toComponent,
             fromPin,
             toPin,
+            lastPulseCycle: -1,
         };
+    }
+
+    private advancePinStates(now: number) {
+        this.wires.forEach((wire) => {
+            const cycle = Math.floor(now * (wire.isBus ? 0.00012 : 0.00016) + wire.phase);
+            if (cycle <= wire.lastPulseCycle) return;
+            wire.lastPulseCycle = cycle;
+            const sender = wire.pulseDirection === -1 ? wire.toPin : wire.fromPin;
+            const receiver = wire.pulseDirection === -1 ? wire.fromPin : wire.toPin;
+            sender.state = Math.min(1, sender.state + this.pinStateChange);
+            receiver.state = Math.max(0, receiver.state - this.pinStateChange);
+        });
     }
 
     private canAddWires(wires: CircuitWire[], connectedComponents: CircuitComponent[]) {
@@ -654,7 +854,11 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         for (const removedComponent of removedComponents) {
             const component = removedComponent.kind === 'cpu'
                 ? this.createCpu(this.layout.scale, random)
-                : this.createDip(this.layout.scale, random);
+                : removedComponent.kind === 'dip'
+                    ? this.createDip(this.layout.scale, random)
+                    : removedComponent.kind === 'big_dip'
+                        ? this.createBigDip(this.layout.scale, random)
+                        : this.createDisplay(this.layout.scale, random);
             if (this.placeComponent(component, this.layout.width, this.layout.height, random)) {
                 this.components.push(component);
                 components.push(component);
@@ -676,7 +880,10 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         if (!lifecycle) return;
 
         const random = this.createTransitionRandom();
-        lifecycle.wires = lifecycle.components.flatMap((component) => this.connectAddedComponent(component, random));
+        const firstWire = this.wires.length;
+        lifecycle.components.forEach((component) => this.connectAddedComponent(component, random));
+        this.connectUnconnectedComponents(random);
+        lifecycle.wires = this.wires.slice(firstWire);
         lifecycle.wireSet = new Set(lifecycle.wires);
         lifecycle.phase = 'growing';
         lifecycle.startedAt = now;
@@ -851,6 +1058,7 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         context.globalAlpha = visibility;
         context.translate(-lift * 0.8, -lift);
         this.drawComponent(context, component, now);
+        if (component.kind === 'display') this.drawDisplayGrid(context, component, now);
         context.restore();
     }
 
@@ -898,7 +1106,8 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         startProgress: number,
         endProgress: number,
     ) {
-        const progress = (now * (wire.isBus ? 0.00012 : 0.00016) + wire.phase) % 1;
+        const cycleProgress = (now * (wire.isBus ? 0.00012 : 0.00016) + wire.phase) % 1;
+        const progress = wire.pulseDirection === -1 ? 1 - cycleProgress : cycleProgress;
         if (progress < startProgress || progress > endProgress) return;
         const pulse = this.pointAlong(wire, progress);
         context.fillStyle = wire.isBus ? 'rgba(206, 246, 255, 0.95)' : 'rgba(184, 230, 255, 0.82)';
@@ -920,6 +1129,10 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         const units = Math.round(length / this.gridSize);
         const first = Math.max(1, Math.floor((units - (count - 1)) / 2));
         return Math.min(units - 1, first + index) * this.gridSize;
+    }
+
+    private centeredPinOffset(length: number, index: number, count: number) {
+        return length / 2 + (index - (count - 1) / 2) * this.gridSize;
     }
 
     private randomGridCoordinate(minimum: number, maximum: number, random: () => number) {
@@ -974,20 +1187,96 @@ export class CircuitPreset implements LayeredBackgroundPreset {
 
         context.fillStyle = 'rgba(160, 225, 244, 0.62)';
         if (component.kind === 'cpu') {
-            context.fillRect(component.x + component.width / 2 - 7, component.y - 1, 14, 3);
             this.drawCpuMarker(context, component);
             context.fillStyle = 'rgba(160, 225, 244, 0.62)';
             context.font = '600 10px ui-monospace, SFMono-Regular, Consolas, monospace';
             context.textAlign = 'center';
             context.fillText(component.label, component.x + component.width / 2, component.y + component.height / 2 + 3.5);
-        } else {
+        } else if (component.kind === 'dip' || component.kind === 'big_dip') {
+            const {width, height} = this.dipBaseDimensions(component);
+            const rotation = component.rotation ?? 0;
+            const notch = this.rotateDipPoint(component, {x: width / 2, y: 0});
+            context.save();
+            context.translate(component.x + notch.x, component.y + notch.y);
+            context.rotate(rotation * Math.PI / 180);
             context.beginPath();
-            context.arc(component.x + component.width / 2, component.y + 3, 4, 0, Math.PI);
+            context.arc(0, 0, 5, 0, Math.PI);
             context.fill();
             context.font = '500 6px ui-monospace, SFMono-Regular, Consolas, monospace';
             context.textAlign = 'center';
-            context.fillText(component.label, component.x + component.width / 2, component.y + component.height / 2 + 2);
+            const label = this.rotateDipPoint(component, {x: width / 2, y: height / 2 + 2});
+            context.restore();
+            context.save();
+            context.translate(component.x + label.x, component.y + label.y);
+            context.rotate(rotation * Math.PI / 180);
+            context.font = '500 6px ui-monospace, SFMono-Regular, Consolas, monospace';
+            context.textAlign = 'center';
+            context.fillText(component.label, 0, 0);
+            context.restore();
+        } else {
+            context.font = '600 7px ui-monospace, SFMono-Regular, Consolas, monospace';
+            context.textAlign = 'center';
+            context.fillText(component.label, component.x + component.width / 2, component.y + component.height + 10);
         }
+    }
+
+    private drawDisplayGrid(context: CircuitRenderContext, component: CircuitComponent, now: number) {
+        const values = this.advanceDisplayGrid(component, now);
+        const inset = 6;
+        const cellWidth = (component.width - inset * 2) / this.displayGridSize;
+        const cellHeight = (component.height - inset * 2) / this.displayGridSize;
+
+        for (let row = 0; row < this.displayGridSize; row += 1) {
+            for (let column = 0; column < this.displayGridSize; column += 1) {
+                const value = values[row * this.displayGridSize + column];
+                context.fillStyle = this.displayPixelColor(value);
+                context.fillRect(
+                    component.x + inset + column * cellWidth,
+                    component.y + inset + row * cellHeight,
+                    Math.ceil(cellWidth),
+                    Math.ceil(cellHeight),
+                );
+            }
+        }
+    }
+
+    private advanceDisplayGrid(component: CircuitComponent, now: number) {
+        const connectedPins = this.wires
+            .filter((wire) => wire.fromComponent === component || wire.toComponent === component)
+            .flatMap((wire) => wire.fromComponent === component
+                ? [wire.toPin.state]
+                : [wire.fromPin.state]);
+        const states = connectedPins.length ? connectedPins : component.pins.map((pin) => pin.state);
+        const targetValues = Array.from({length: this.displayGridSize ** 2}, (_, index) =>
+            this.displayPixelValue(states, Math.floor(index / this.displayGridSize), index % this.displayGridSize),
+        );
+        if (!component.displayValues) {
+            component.displayValues = targetValues;
+            component.displayUpdatedAt = now;
+            return component.displayValues;
+        }
+
+        const elapsed = Math.min(250, Math.max(0, now - (component.displayUpdatedAt ?? now)));
+        const transition = 1 - Math.exp(-elapsed / this.displayTransitionDuration);
+        component.displayValues = targetValues.map((target, index) =>
+            component.displayValues![index] + (target - component.displayValues![index]) * transition,
+        );
+        component.displayUpdatedAt = now;
+        return component.displayValues;
+    }
+
+    private displayPixelColor(value: number) {
+        const red = Math.round(9 + value * 177);
+        const green = Math.round(40 + value * 202);
+        const blue = Math.round(52 + value * 203);
+        return `rgb(${red}, ${green}, ${blue})`;
+    }
+
+    private displayPixelValue(states: number[], row: number, column: number) {
+        const sample = (offset: number) => states[(row * 11 + column * 7 + offset) % states.length];
+        const base = (sample(0) + sample(1) + sample(2)) / 3;
+        const variation = Math.sin((row + 1) * sample(3) * 4.7 + (column + 1) * sample(4) * 3.1) * 0.12;
+        return Math.min(1, Math.max(0, base + variation));
     }
 
     private drawCpuMarker(context: CircuitRenderContext, component: CircuitComponent) {

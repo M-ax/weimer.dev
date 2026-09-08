@@ -11,16 +11,20 @@ interface TestPoint {
 interface TestPin extends TestPoint {
     side: PinSide;
     used: boolean;
+    state?: number;
 }
 
 interface TestComponent {
-    kind: 'cpu' | 'dip';
+    kind: 'cpu' | 'dip' | 'big_dip' | 'display';
     x: number;
     y: number;
     width: number;
     height: number;
     label: string;
+    rotation?: 0 | 90 | 180 | 270;
     pins: TestPin[];
+    displayValues?: number[];
+    displayUpdatedAt?: number;
 }
 
 interface TestWire {
@@ -29,13 +33,22 @@ interface TestWire {
     toComponent?: TestComponent;
     fromPin?: TestPin;
     toPin?: TestPin;
+    phase?: number;
+    isBus?: boolean;
+    pulseDirection?: -1 | 1;
+    lastPulseCycle?: number;
 }
 
 interface CircuitPresetTestHarness {
+    resize(dimensions: {width: number; height: number; pixelRatio: number}): void;
     connectBus(from: TestComponent, to: TestComponent, random: () => number): boolean;
     connectPins(from: TestComponent, to: TestComponent, random: () => number): boolean;
     createCpu(scale: number, random: () => number): TestComponent;
     createDip(scale: number, random: () => number): TestComponent;
+    createBigDip(scale: number, random: () => number): TestComponent;
+    createDisplay(scale: number, random: () => number): TestComponent;
+    advancePinStates(now: number): void;
+    advanceDisplayGrid(component: TestComponent, now: number): number[];
     connectAddedComponent(component: TestComponent, random: () => number): TestWire[];
     removalWireRange(wire: TestWire, component: TestComponent, progress: number): [number, number];
     beginRemoval(now: number): void;
@@ -76,11 +89,16 @@ const createComponent = (x: number, y: number, side: PinSide): TestComponent => 
     };
 };
 
-const connectBus = (from: TestComponent, to: TestComponent, obstacles: TestComponent[] = []) => {
+const connectBus = (
+    from: TestComponent,
+    to: TestComponent,
+    obstacles: TestComponent[] = [],
+    random: () => number = () => 0,
+) => {
     const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
     preset.components = [from, to, ...obstacles];
 
-    return {connected: preset.connectBus(from, to, () => 0), wires: preset.wires};
+    return {connected: preset.connectBus(from, to, random), wires: preset.wires};
 };
 
 const connectPins = (
@@ -88,12 +106,13 @@ const connectPins = (
     to: TestComponent,
     obstacles: TestComponent[] = [],
     wires: TestWire[] = [],
+    random: () => number = () => 0,
 ) => {
     const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
     preset.components = [from, to, ...obstacles];
     preset.wires = wires;
 
-    return {connected: preset.connectPins(from, to, () => 0), wires: preset.wires};
+    return {connected: preset.connectPins(from, to, random), wires: preset.wires};
 };
 
 const overlapLength = (firstStart: number, firstEnd: number, secondStart: number, secondEnd: number) =>
@@ -155,6 +174,170 @@ describe('CircuitPreset component labels', () => {
 
         expect(cpu.label).toMatch(/^(?:TMS320F28027|MSP430G2553|AM3352BZCZ60|TMS570LS1227|TMS320C5510)$/);
         expect(dip.label).toMatch(/^(?:SN74HC00N|SN74LS14N|CD74HC4060E|LM358P|TL072CP|NE555P)$/);
+    });
+
+    test('initializes every spawned pin with a numeric state', () => {
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+
+        expect(preset.createCpu(1, () => 0.5).pins.every((pin) => Number.isFinite(pin.state))).toBe(true);
+        expect(preset.createDip(1, () => 0.5).pins.every((pin) => Number.isFinite(pin.state))).toBe(true);
+    });
+
+    test('fills each regular DIP side with the missing pin', () => {
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+        const dip = preset.createDip(1, () => 0.5);
+        const leftPins = dip.pins.filter((pin) => pin.side === 'left').sort((left, right) => left.y - right.y);
+        const rightPins = dip.pins.filter((pin) => pin.side === 'right').sort((left, right) => left.y - right.y);
+
+        expect(dip.pins.filter((pin) => pin.side === 'bottom')).toHaveLength(0);
+        expect(leftPins).toHaveLength(6);
+        expect(rightPins).toHaveLength(6);
+        expect(leftPins.every((pin, index) => index === 0 || pin.y - leftPins[index - 1].y === gridSize)).toBe(true);
+        expect(rightPins.every((pin, index) => index === 0 || pin.y - rightPins[index - 1].y === gridSize)).toBe(true);
+    });
+
+    test('creates big DIPs with the additional lower pin banks', () => {
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+        const dip = preset.createBigDip(1, () => 0);
+        const leftPins = dip.pins.filter((pin) => pin.side === 'left').sort((left, right) => left.y - right.y);
+        const rightPins = dip.pins.filter((pin) => pin.side === 'right').sort((left, right) => left.y - right.y);
+
+        expect(dip.kind).toBe('big_dip');
+        expect(dip.pins.filter((pin) => pin.side === 'bottom')).toHaveLength(0);
+        expect(leftPins).toHaveLength(8);
+        expect(rightPins).toHaveLength(8);
+        expect(leftPins[4].y - leftPins[3].y).toBeGreaterThan(gridSize * 2);
+        expect(rightPins[4].y - rightPins[3].y).toBeGreaterThan(gridSize * 2);
+    });
+
+    test('creates DIPs in all four right-angle orientations', () => {
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+
+        ([
+            [0, 0],
+            [0.25, 90],
+            [0.5, 180],
+            [0.75, 270],
+        ] as const).forEach(([randomValue, rotation]) => {
+            const dip = preset.createDip(1, () => randomValue);
+
+            expect(dip.rotation).toBe(rotation);
+            expect(dip.width > dip.height).toBe(rotation === 90 || rotation === 270);
+        });
+    });
+
+    test('centers each display pin group on its edge', () => {
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+        const display = preset.createDisplay(0.72, () => 0);
+
+        (['top', 'right', 'bottom', 'left'] as const).forEach((side) => {
+            const pins = display.pins.filter((pin) => pin.side === side);
+            const axis = side === 'top' || side === 'bottom' ? 'x' : 'y';
+            const average = pins.reduce((total, pin) => total + pin[axis], 0) / pins.length;
+            const center = axis === 'x' ? display.x + display.width / 2 : display.y + display.height / 2;
+
+            expect(average).toBe(center);
+        });
+    });
+
+    test('places multiple displays on larger circuit fields', () => {
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+        (preset as unknown as {renderStaticLayer: () => void}).renderStaticLayer = () => {};
+
+        preset.resize({width: 1_600, height: 1_000, pixelRatio: 1});
+
+        const displays = preset.components.filter((component) => component.kind === 'display');
+        expect(displays.length).toBeGreaterThan(1);
+        expect(new Set(displays.map((display) => `${display.x}:${display.y}`)).size).toBe(displays.length);
+    });
+
+    test('connects every component on a compact circuit field', () => {
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+        (preset as unknown as {renderStaticLayer: () => void}).renderStaticLayer = () => {};
+
+        preset.resize({width: 800, height: 600, pixelRatio: 1});
+
+        expect(preset.components.every((component) => preset.wires.some((wire) =>
+            wire.fromComponent === component || wire.toComponent === component,
+        ))).toBe(true);
+    });
+
+    test('creates a dense initial network without isolated components', () => {
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+        (preset as unknown as {renderStaticLayer: () => void}).renderStaticLayer = () => {};
+
+        preset.resize({width: 1_600, height: 1_000, pixelRatio: 1});
+
+        expect(preset.wires.length).toBeGreaterThan(24);
+        expect(preset.components.every((component) => preset.wires.some((wire) =>
+            wire.fromComponent === component || wire.toComponent === component,
+        ))).toBe(true);
+    });
+
+    test('raises a sending pin state and lowers a receiving pin state once per pulse cycle', () => {
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+        const source = preset.createCpu(1, () => 0.5);
+        const destination = preset.createDip(1, () => 0.5);
+        const fromPin = source.pins[0];
+        const toPin = destination.pins[0];
+        preset.wires = [{
+            points: [fromPin, toPin],
+            fromComponent: source,
+            toComponent: destination,
+            fromPin,
+            toPin,
+            phase: 0,
+            isBus: false,
+            lastPulseCycle: -1,
+        }];
+
+        preset.advancePinStates(7_000);
+
+        expect(fromPin.state).toBeGreaterThan(0.5);
+        expect(toPin.state).toBeLessThan(0.5);
+    });
+
+    test('randomizes trace direction and keeps all bus pulses moving together', () => {
+        const forwardTrace = connectPins(createComponent(0, 0, 'right'), createComponent(300, 0, 'left'));
+        const reverseTrace = connectPins(
+            createComponent(0, 0, 'right'),
+            createComponent(300, 0, 'left'),
+            [],
+            [],
+            () => 0.75,
+        );
+        const bus = connectBus(
+            createComponent(0, 0, 'right'),
+            createComponent(300, 0, 'left'),
+            [],
+            () => 0.75,
+        );
+
+        expect(forwardTrace.wires[0].pulseDirection).toBe(1);
+        expect(reverseTrace.wires[0].pulseDirection).toBe(-1);
+        expect(bus.connected).toBe(true);
+        expect(bus.wires.map((wire) => wire.pulseDirection)).toEqual([-1, -1, -1]);
+    });
+
+    test('uses an eight-by-eight display grid that eases toward changed pin states', () => {
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+        const display = preset.createDisplay(1, () => 0.5);
+
+        preset.advanceDisplayGrid(display, 0);
+        const initialValue = display.displayValues![0];
+        expect(display.displayValues).toHaveLength(64);
+
+        display.pins.forEach((pin) => {
+            pin.state = 1;
+        });
+        preset.advanceDisplayGrid(display, 100);
+        const transitioningValue = display.displayValues![0];
+        preset.advanceDisplayGrid(display, 700);
+
+        expect(transitioningValue).toBeGreaterThan(initialValue);
+        expect(transitioningValue).toBeLessThan(1);
+        expect(display.displayValues![0]).toBeGreaterThan(transitioningValue);
+        expect(display.displayValues![0]).toBeLessThan(1);
     });
 });
 

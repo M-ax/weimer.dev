@@ -72,6 +72,7 @@ export class CircuitPreset implements LayeredBackgroundPreset {
     private readonly lifecycleInterval = 12_000;
     private readonly componentTransitionDuration = 900;
     private readonly wireTransitionDuration = 1_750;
+    private readonly lifecycleComponentStagger = 150;
     private readonly pinStateChange = 0.08;
     private readonly displayGridSize = 8;
     private readonly displayTransitionDuration = 550;
@@ -284,7 +285,7 @@ export class CircuitPreset implements LayeredBackgroundPreset {
             label: 'DISPLAY',
             pins: [],
         };
-        for (let index = 0; index < 3; index += 1) {
+        for (let index = 0; index < 4; index += 1) {
             component.pins.push(
                 this.createPin('top', random),
                 this.createPin('right', random),
@@ -332,11 +333,8 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         if (component.kind !== 'dip' && component.kind !== 'big_dip') {
             const pinsPerSide = component.pins.length / 4;
             for (let index = 0; index < pinsPerSide; index += 1) {
-                const pinOffset = component.kind === 'display'
-                    ? this.centeredPinOffset
-                    : this.pinOffset;
-                const horizontal = component.x + pinOffset.call(this, component.width, index, pinsPerSide);
-                const vertical = component.y + pinOffset.call(this, component.height, index, pinsPerSide);
+                const horizontal = component.x + this.pinOffset(component.width, index, pinsPerSide);
+                const vertical = component.y + this.pinOffset(component.height, index, pinsPerSide);
                 const pinIndex = index * 4;
                 this.positionPin(component.pins[pinIndex], horizontal, component.y);
                 this.positionPin(component.pins[pinIndex + 1], component.x + component.width, vertical);
@@ -765,8 +763,7 @@ export class CircuitPreset implements LayeredBackgroundPreset {
             return;
         }
 
-        const progress = this.lifecycleProgress(now);
-        if (progress < 1) return;
+        if (!this.isLifecycleComplete(now)) return;
 
         if (this.lifecycle.phase === 'lifting') {
             this.lifecycle.phase = 'erasing';
@@ -921,12 +918,32 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         return this.wires.slice(firstWire);
     }
 
-    private lifecycleProgress(now: number) {
+    private lifecycleProgress(now: number, component?: CircuitComponent) {
         if (!this.lifecycle) return 1;
         const duration = this.lifecycle.phase === 'lifting' || this.lifecycle.phase === 'lowering'
             ? this.componentTransitionDuration
             : this.wireTransitionDuration;
-        return Math.min(1, Math.max(0, (now - this.lifecycle.startedAt) / duration));
+        return Math.min(1, Math.max(0, (now - this.lifecycle.startedAt - this.lifecycleComponentDelay(component)) / duration));
+    }
+
+    private isLifecycleComplete(now: number) {
+        return this.lifecycle?.components.every((component) => this.lifecycleProgress(now, component) === 1) ?? true;
+    }
+
+    private lifecycleComponentDelay(component?: CircuitComponent) {
+        if (!component || !this.lifecycle) return 0;
+        return Math.max(0, this.lifecycle.components.indexOf(component)) * this.lifecycleComponentStagger;
+    }
+
+    private lifecycleWireComponent(wire: CircuitWire) {
+        const lifecycle = this.lifecycle;
+        if (!lifecycle) return wire.fromComponent;
+
+        const fromIndex = lifecycle.components.indexOf(wire.fromComponent);
+        const toIndex = lifecycle.components.indexOf(wire.toComponent);
+        if (fromIndex < 0) return wire.toComponent;
+        if (toIndex < 0) return wire.fromComponent;
+        return fromIndex <= toIndex ? wire.fromComponent : wire.toComponent;
     }
 
     private createTransitionRandom() {
@@ -1008,7 +1025,6 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         const lifecycle = this.lifecycle;
         if (!lifecycle) return;
 
-        const progress = this.lifecycleProgress(now);
         context.save();
         context.lineCap = 'round';
         context.lineJoin = 'round';
@@ -1018,23 +1034,26 @@ export class CircuitPreset implements LayeredBackgroundPreset {
                 this.drawPulseRange(context, wire, now, 0, 1);
             });
             lifecycle.components.forEach((component) =>
-                this.drawTransitionComponent(context, component, now, progress, true),
+                this.drawTransitionComponent(context, component, now, this.lifecycleProgress(now, component), true),
             );
         } else if (lifecycle.phase === 'erasing') {
             lifecycle.wires.forEach((wire) => {
-                const removedComponent = lifecycle.components.includes(wire.fromComponent)
-                    ? wire.fromComponent
-                    : wire.toComponent;
-                const [start, end] = this.removalWireRange(wire, removedComponent, progress);
+                const removedComponent = this.lifecycleWireComponent(wire);
+                const [start, end] = this.removalWireRange(
+                    wire,
+                    removedComponent,
+                    this.lifecycleProgress(now, removedComponent),
+                );
                 this.drawWireRange(context, wire, start, end);
                 this.drawPulseRange(context, wire, now, start, end);
             });
         } else if (lifecycle.phase === 'lowering') {
             lifecycle.components.forEach((component) =>
-                this.drawTransitionComponent(context, component, now, progress, false),
+                this.drawTransitionComponent(context, component, now, this.lifecycleProgress(now, component), false),
             );
         } else {
             lifecycle.wires.forEach((wire) => {
+                const progress = this.lifecycleProgress(now, this.lifecycleWireComponent(wire));
                 this.drawWireRange(context, wire, 0, progress);
                 this.drawPulseRange(context, wire, now, 0, progress);
             });
@@ -1129,10 +1148,6 @@ export class CircuitPreset implements LayeredBackgroundPreset {
         const units = Math.round(length / this.gridSize);
         const first = Math.max(1, Math.floor((units - (count - 1)) / 2));
         return Math.min(units - 1, first + index) * this.gridSize;
-    }
-
-    private centeredPinOffset(length: number, index: number, count: number) {
-        return length / 2 + (index - (count - 1) / 2) * this.gridSize;
     }
 
     private randomGridCoordinate(minimum: number, maximum: number, random: () => number) {

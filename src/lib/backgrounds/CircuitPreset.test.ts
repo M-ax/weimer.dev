@@ -54,6 +54,7 @@ interface CircuitPresetTestHarness {
     beginRemoval(now: number): void;
     selectRemovalBatch(candidates: TestComponent[], random: () => number): TestComponent[];
     advanceLifecycle(now: number): void;
+    lifecycleProgress(now: number, component?: TestComponent): number;
     placeComponent(component: TestComponent, width: number, height: number, random: () => number): boolean;
     components: TestComponent[];
     wires: TestWire[];
@@ -226,17 +227,16 @@ describe('CircuitPreset component labels', () => {
         });
     });
 
-    test('centers each display pin group on its edge', () => {
+    test('creates four grid-aligned inputs on each display edge', () => {
         const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
-        const display = preset.createDisplay(0.72, () => 0);
+        const display = preset.createDisplay(1, () => 0);
 
         (['top', 'right', 'bottom', 'left'] as const).forEach((side) => {
             const pins = display.pins.filter((pin) => pin.side === side);
             const axis = side === 'top' || side === 'bottom' ? 'x' : 'y';
-            const average = pins.reduce((total, pin) => total + pin[axis], 0) / pins.length;
-            const center = axis === 'x' ? display.x + display.width / 2 : display.y + display.height / 2;
 
-            expect(average).toBe(center);
+            expect(pins).toHaveLength(4);
+            expect(pins.every((pin) => pin[axis] % gridSize === 0)).toBe(true);
         });
     });
 
@@ -541,11 +541,54 @@ describe('CircuitPreset component lifecycle', () => {
             wireSet: new Set([firstWire, secondWire]),
         };
 
-        preset.advanceLifecycle(1_751);
+        preset.advanceLifecycle(1_901);
 
         expect(preset.components).toEqual([survivor]);
         expect(preset.wires).toHaveLength(0);
         expect(survivor.pins[0].used).toBe(false);
+    });
+
+    test('staggers component lifting within a removal batch', () => {
+        const first = createComponent(0, 0, 'right');
+        const second = createComponent(300, 0, 'left');
+        const third = createComponent(0, 180, 'right');
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+        preset.lifecycle = {
+            phase: 'lifting',
+            startedAt: 0,
+            components: [first, second, third],
+            wires: [],
+            wireSet: new Set(),
+        };
+
+        expect(preset.lifecycleProgress(900, first)).toBe(1);
+        expect(preset.lifecycleProgress(900, second)).toBeLessThan(1);
+        expect(preset.lifecycleProgress(900, third)).toBeLessThan(preset.lifecycleProgress(900, second));
+        preset.advanceLifecycle(900);
+
+        expect(preset.lifecycle?.phase).toBe('lifting');
+    });
+
+    test('staggers component lowering within an addition batch', () => {
+        const first = createComponent(0, 0, 'right');
+        const second = createComponent(300, 0, 'left');
+        const third = createComponent(0, 180, 'right');
+        const preset = new CircuitPreset() as unknown as CircuitPresetTestHarness;
+        preset.components = [first, second, third];
+        preset.lifecycle = {
+            phase: 'lowering',
+            startedAt: 0,
+            components: [first, second, third],
+            wires: [],
+            wireSet: new Set(),
+        };
+
+        expect(preset.lifecycleProgress(900, first)).toBe(1);
+        expect(preset.lifecycleProgress(900, second)).toBeLessThan(1);
+        expect(preset.lifecycleProgress(900, third)).toBeLessThan(preset.lifecycleProgress(900, second));
+        preset.advanceLifecycle(900);
+
+        expect(preset.lifecycle?.phase).toBe('lowering');
     });
 
     test('connects a lowered component to nearby components with free pins', () => {

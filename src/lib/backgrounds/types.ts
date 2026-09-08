@@ -1,4 +1,4 @@
-export type PresetName = 'maze' | 'circuit' | 'constellation';
+export type PresetName = 'maze' | 'circuit' | 'constellation' | 'halvorsen';
 
 export interface BackgroundDimensions {
   width: number;

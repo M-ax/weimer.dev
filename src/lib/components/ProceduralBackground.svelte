@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { CircuitPreset } from '../backgrounds/CircuitPreset';
   import { ConstellationPreset } from '../backgrounds/ConstellationPreset';
+  import { HalvorsenPreset } from '../backgrounds/HalvorsenPreset';
   import { MazePreset, mazeStepInterval } from '../backgrounds/MazePreset';
   import type {
     BackgroundDimensions,
@@ -30,6 +31,7 @@
     maze: new MazePreset(),
     circuit: new CircuitPreset(),
     constellation: new ConstellationPreset(),
+    halvorsen: new HalvorsenPreset(),
   };
 
   let preset: BackgroundPreset = presets.maze;

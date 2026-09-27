@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { BlogPost } from '../lib/blog';
   import { formatDate } from '../lib/format-date';
+  import { renderDiagrams } from '../lib/render-diagrams';
 
   export let post: BlogPost;
   export let onNavigate: (path: string) => void;
@@ -22,6 +23,6 @@
     <h1>{post.title}</h1>
     <p class="article-summary">{post.summary}</p>
     <div class="article-tags">{#each post.tags as tag}<span class="tag">{tag}</span>{/each}</div>
-    <div class="markdown-body">{@html post.html}</div>
+    <div class="markdown-body" use:renderDiagrams={post.html}>{@html post.html}</div>
   </article>
 </main>

@@ -2,6 +2,8 @@
 /out-tsc
 /dist
 
+.DS_Store
+
 /node_modules
 .svelte-kit
 .vite

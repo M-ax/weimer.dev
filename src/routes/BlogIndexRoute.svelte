@@ -5,6 +5,7 @@
   export let onNavigate: (path: string) => void;
 
   function followLink(event: MouseEvent, path: string) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
     onNavigate(path);
   }
@@ -18,20 +19,26 @@
   <section class="page-intro">
     <p class="eyebrow"><span></span>Field notes</p>
     <h1>Ideas from the<br /><em>workbench.</em></h1>
-    <p>Notes on software, manufacturing systems, and the practical craft of building tools that hold up.</p>
+    <p>Project notes on shared media, desktop software, game mods, and the details that make them work.</p>
   </section>
 
-  <section class="post-list" aria-label="Blog posts">
+  <ul class="post-list" aria-label="Blog posts">
     {#each posts as post}
-      <article class="post-card">
-        <div class="post-meta"><span>{formatDate(post.date)}</span><span>{post.readingTime}</span></div>
-        <h2><a href={`/blog/${post.slug}`} onclick={(event) => followLink(event, `/blog/${post.slug}`)}>{post.title}</a></h2>
-        <p>{post.summary}</p>
-        <div class="post-footer">
-          <div>{#each post.tags as tag}<span class="tag">{tag}</span>{/each}</div>
-          <a class="arrow-link" href={`/blog/${post.slug}`} onclick={(event) => followLink(event, `/blog/${post.slug}`)} aria-label={`Read ${post.title}`}>↗</a>
-        </div>
-      </article>
+      <li>
+        <article class="post-row">
+          <div class="post-meta">
+            <time datetime={post.date}>{formatDate(post.date)}</time>
+            <span>{post.readingTime}</span>
+          </div>
+          <div class="post-content">
+            <h2><a href={`/blog/${post.slug}`} onclick={(event) => followLink(event, `/blog/${post.slug}`)}>{post.title}<span aria-hidden="true">↗</span></a></h2>
+            <p>{post.summary}</p>
+            <ul class="post-topics" aria-label="Topics">
+              {#each post.tags as tag}<li>{tag}</li>{/each}
+            </ul>
+          </div>
+        </article>
+      </li>
     {/each}
-  </section>
+  </ul>
 </main>

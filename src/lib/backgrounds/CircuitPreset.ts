@@ -65,6 +65,7 @@ interface CircuitLayout {
 export class CircuitPreset implements LayeredBackgroundPreset {
     readonly name = 'circuit' as const;
     readonly label = 'Circuit field';
+    readonly appearance = { blurPx: 2, brightness: 0.48 };
     readonly hasDynamicContent = true;
     private readonly gridSize = 15;
     private readonly busLaneSpacing = this.gridSize;

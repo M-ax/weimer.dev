@@ -82,6 +82,7 @@ const additionalLifeforms = [glider, toad, beacon, rPentomino, acorn, diehard];
 export class GameOfLifePreset implements LayeredBackgroundPreset {
   readonly name = 'life' as const;
   readonly label = 'Life laboratory';
+  readonly appearance = { blurPx: 4, brightness: 0.32 };
   readonly hasDynamicContent = true;
   private grid: LifeGrid | null = null;
   private _staticVersion = 0;

@@ -51,6 +51,7 @@ export const mazeStepInterval = 1_000 / 15;
 export class MazePreset implements LayeredBackgroundPreset {
   readonly name = 'maze' as const;
   readonly label = 'Maze solver';
+  readonly appearance = { blurPx: 2, brightness: 0.48 };
   readonly hasDynamicContent = true;
   private maze: Maze | null = null;
   private layer: HTMLCanvasElement | null = null;

@@ -356,7 +356,14 @@
   });
 </script>
 
-<div class:unfiltered class="background" bind:this={background} aria-hidden="true">
+<div
+  class:unfiltered
+  class="background"
+  bind:this={background}
+  style:--background-blur={`${preset.appearance.blurPx}px`}
+  style:--background-brightness={preset.appearance.brightness}
+  aria-hidden="true"
+>
   <div class="canvas-stack" bind:this={canvasStack} style:height={`${canvasHeight}px`}>
     <canvas class="background-canvas" bind:this={canvas}></canvas>
     <canvas class="dynamic-canvas" bind:this={dynamicCanvas}></canvas>
@@ -420,7 +427,7 @@
 
   .canvas-stack,
   .transition-canvas {
-    filter: blur(2px) brightness(0.48) saturate(0.82);
+    filter: blur(var(--background-blur)) brightness(var(--background-brightness)) saturate(0.82);
     transform: scale(1.035);
   }
 

@@ -33,6 +33,7 @@ const initialPoints: AttractorPoint[] = [
 export class HalvorsenPreset implements LayeredBackgroundPreset {
   readonly name = 'halvorsen' as const;
   readonly label = 'Halvorsen attractor';
+  readonly appearance = { blurPx: 2, brightness: 0.48 };
   readonly hasDynamicContent = true;
   private paths: ProjectedPoint[][] = [];
   private staticLayer: StaticCanvas | null = null;

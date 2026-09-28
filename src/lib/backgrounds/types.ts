@@ -15,6 +15,12 @@ export interface BackgroundFrame extends BackgroundDimensions {
 export interface BackgroundPreset {
   readonly name: PresetName;
   readonly label: string;
+  readonly appearance: {
+    /** Blur radius in CSS pixels. */
+    readonly blurPx: number;
+    /** Retained brightness, from 0 (black) to 1 (no darkening). */
+    readonly brightness: number;
+  };
   resize(dimensions: BackgroundDimensions): void;
   draw(context: CanvasRenderingContext2D, frame: BackgroundFrame): void;
 }

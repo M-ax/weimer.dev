@@ -38,6 +38,7 @@ const cometTrailLifetime = 96;
 export class ConstellationPreset implements BackgroundPreset {
   readonly name = 'constellation' as const;
   readonly label = 'Signal constellation';
+  readonly appearance = { blurPx: 2, brightness: 0.7 };
   private particles: Particle[] = [];
 
   resize({ width, height }: BackgroundDimensions) {
